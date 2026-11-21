@@ -4,8 +4,8 @@
 
 The root `compose.yaml` is ready to deploy from Arcane. It pulls the private
 `enly1/templogger:latest` image for `linux/amd64`, publishes the dashboard on
-port 9000, and stores SQLite and CSV data in the named `templogger_data`
-volume. The default ESPHome proxy is `192.168.1.252:6053`.
+host port `9002` to container port `9000`, and stores SQLite and CSV data in the
+named `templogger_data` volume. The default ESPHome proxy is `192.168.1.252:6053`.
 
 Before deploying in Arcane:
 
@@ -18,8 +18,8 @@ Before deploying in Arcane:
    policy is set to **always** in the Compose file so redeploys pick up the
    current `latest` image.
 
-The dashboard has no authentication; limit port 9000 to trusted networks. The
-volume persists across redeploys. Container deployments start with an empty
+The dashboard has no authentication; limit host port 9002 to trusted networks.
+The volume persists across redeploys. Container deployments start with an empty
 database; to retain existing history, create a consistent SQLite backup using
 `sqlite3 readings.sqlite '.backup backup.sqlite'` and copy it into the volume
 as `/data/readings.sqlite` before starting the logger. Ensure that UID 10001

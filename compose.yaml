@@ -5,7 +5,7 @@ services:
     pull_policy: always
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      - "9002:9000"
     environment:
       TZ: Europe/London
       ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
