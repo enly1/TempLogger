@@ -779,6 +779,7 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 	address := proxyAddress(host)
 	packets := make(chan reading, 128)
 	lastSaved := time.Time{}
+	deduper := packetCounterDeduper{}
 	log.Printf("Connecting to ESPHome Bluetooth proxy at %s", address)
 
 	for {
@@ -809,6 +810,9 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 					return
 				}
 				lastAdvertisement.Store(r.Time.UnixNano())
+				if !deduper.first(r) {
+					return
+				}
 				if monitor || logPackets {
 					log.Printf("ATC_EA80E1 #%d  %.1f°C  %d%% RH  battery %d%% (%.3f V)  RSSI %d dBm",
 						r.Counter, r.Temp, r.Humidity, r.Battery, float64(r.Millivolts)/1000, r.RSSI)
