@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TempLogger · ATC_EA80E1</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/dashboard.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="device">ATC_EA80E1</p><h1>Temperature log</h1></div>
+      <p id="status" role="status">Loading history…</p>
+    </header>
+    <section class="readings" aria-label="Latest reading">
+      <div><span>Temperature</span><strong id="temperature">—</strong></div>
+      <div><span>Humidity</span><strong id="humidity">—</strong></div>
+      <div><span>Battery</span><strong id="battery">—</strong><small id="battery-voltage">Sensor estimate</small></div>
+      <div><span>Last reading</span><strong id="seen">—</strong></div>
+    </section>
+    <section class="history" aria-label="Reading history">
+      <div class="toolbar">
+        <nav id="ranges" aria-label="Time range">
+          <button data-range="300000">5m</button><button data-range="600000">10m</button>
+          <button data-range="900000">15m</button><button data-range="1200000">20m</button>
+          <button data-range="1800000">30m</button><button data-range="2700000">45m</button>
+          <button data-range="3600000">1h</button>
+          <button data-range="21600000">6h</button><button data-range="86400000" aria-pressed="true">24h</button>
+          <button data-range="604800000">7d</button><button data-range="2592000000">30d</button>
+          <button data-range="0">All</button>
+        </nav>
+        <div class="controls">
+          <button id="earlier" aria-label="Earlier readings" title="Earlier readings">←</button>
+          <button id="later" aria-label="Later readings" title="Later readings">→</button>
+          <button id="zoom" aria-label="Zoom in" title="Zoom in">＋</button>
+          <button id="live" aria-pressed="true">Live</button>
+        </div>
+      </div>
+      <figure><figcaption>Temperature <small>°C</small></figcaption><canvas id="temp-chart" role="img" aria-label="Temperature over time"></canvas></figure>
+      <figure><figcaption>Humidity <small>%</small></figcaption><canvas id="humidity-chart" role="img" aria-label="Humidity over time"></canvas></figure>
+      <footer><span id="window"></span><output id="detail"></output></footer>
+    </section>
+  </main>
+</body>
+</html>

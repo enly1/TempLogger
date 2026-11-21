@@ -1,0 +1,10 @@
+services:
+  templogger-proxylogs:
+    image: enly1/templogger:latest
+    platform: linux/amd64
+    pull_policy: always
+    restart: unless-stopped
+    command: ["--proxy-logs"]
+    environment:
+      TZ: Europe/London
+      ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
