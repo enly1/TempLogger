@@ -18,6 +18,15 @@ Before deploying in Arcane:
    policy is set to **always** in the Compose file so redeploys pick up the
    current `latest` image.
 
+## GitHub Actions image publishing
+
+`.github/workflows/docker-publish.yml` builds and publishes the `linux/amd64`
+image as `enly1/templogger:latest` and a commit-specific `sha-...` tag whenever
+code is pushed to `main`. It can also be started manually from the Actions tab.
+Set the repository Actions secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
+to a Docker Hub account name and access token with permission to push this
+repository.
+
 The dashboard has no authentication; limit host port 9000 to trusted networks.
 The volume persists across redeploys. Container deployments start with an empty
 database; to retain existing history, create a consistent SQLite backup using
