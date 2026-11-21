@@ -795,8 +795,17 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 			if ctx.Err() != nil {
 				return
 			}
-			events <- event{err: fmt.Errorf("ESPHome Bluetooth proxy %s: %w (check that TCP 6053 is reachable and the API encryption key is correct)", address, err)}
-			return
+			log.Printf("ESPHome Bluetooth proxy %s: failed to connect: %v (check that TCP 6053 is reachable and the API encryption key is correct)", address, err)
+			log.Printf("Proxy connection lost; retrying %s in 5 seconds", address)
+			timer := time.NewTimer(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			log.Printf("Attempting ESPHome proxy reconnect to %s", address)
+			continue
 		}
 
 		log.Printf("Connected to ESPHome Bluetooth proxy %s", address)
