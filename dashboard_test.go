@@ -17,7 +17,7 @@ func historyDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`CREATE TABLE readings (
 		at INTEGER PRIMARY KEY, temperature REAL NOT NULL, humidity INTEGER NOT NULL,
 		battery INTEGER NOT NULL, millivolts INTEGER NOT NULL, rssi INTEGER NOT NULL
-	)`); err != nil {
+	); CREATE TABLE deleted_readings (at INTEGER PRIMARY KEY)`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -97,5 +97,35 @@ func TestHistoryBetweenUsesRequestedBucketResolution(t *testing.T) {
 	}
 	if len(fine) <= len(coarse) {
 		t.Fatalf("fine request returned %d points; coarse request returned %d", len(fine), len(coarse))
+	}
+}
+
+func TestDeleteHistoryBetweenDeletesRangeAndSuppressesCSVReimport(t *testing.T) {
+	db := historyDB(t)
+	start := int64(1_700_000_000_000_000_000)
+	insertHistoryRows(t, db, 3, func(i int) int64 {
+		return start + int64(i)*int64(time.Second)
+	})
+
+	deletedAt := start + int64(time.Second)
+	deleted, err := deleteHistoryBetween(context.Background(), db, deletedAt, deletedAt+int64(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 2 {
+		t.Fatalf("deleted %d readings, want 2", deleted)
+	}
+
+	if _, err := saveReading(context.Background(), db, reading{
+		Time: time.Unix(0, deletedAt), Temp: 21, Humidity: 50, Battery: 80, Millivolts: 2900, RSSI: -60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := db.QueryRow("SELECT COUNT(*) FROM readings").Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("got %d readings after deletion and reimport attempt, want 1", remaining)
 	}
 }

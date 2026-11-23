@@ -27,7 +27,10 @@ import (
 var dashboardFiles embed.FS
 
 const readingColumns = "at, temperature, humidity, battery, millivolts, rssi"
-const insertReading = "INSERT INTO readings (" + readingColumns + ") VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(at) DO NOTHING"
+const insertReading = `INSERT INTO readings (` + readingColumns + `)
+	SELECT ?, ?, ?, ?, ?, ?
+	WHERE NOT EXISTS (SELECT 1 FROM deleted_readings WHERE at = ?)
+	ON CONFLICT(at) DO NOTHING`
 
 type dashboardReading struct {
 	At          int64   `json:"at"`
@@ -42,7 +45,8 @@ type dashboardReading struct {
 func saveReading(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }, r reading) (sql.Result, error) {
-	return db.ExecContext(ctx, insertReading, r.Time.UnixNano(), r.Temp, r.Humidity, r.Battery, r.Millivolts, r.RSSI)
+	at := r.Time.UnixNano()
+	return db.ExecContext(ctx, insertReading, at, r.Temp, r.Humidity, r.Battery, r.Millivolts, r.RSSI, at)
 }
 
 func openHistory(ctx context.Context, dbPath, csvPath string) (*sql.DB, error) {
@@ -84,6 +88,7 @@ func initHistory(ctx context.Context, db *sql.DB, csvPath string) error {
 			at INTEGER PRIMARY KEY, temperature REAL NOT NULL, humidity INTEGER NOT NULL,
 			battery INTEGER NOT NULL, millivolts INTEGER NOT NULL, rssi INTEGER NOT NULL
 		);
+		CREATE TABLE IF NOT EXISTS deleted_readings (at INTEGER PRIMARY KEY);
 	`); err != nil {
 		return err
 	}
@@ -176,6 +181,30 @@ func historyBetweenWithBuckets(ctx context.Context, db *sql.DB, from, to int64, 
 	return points, rows.Err()
 }
 
+func deleteHistoryBetween(ctx context.Context, db *sql.DB, from, to int64) (int64, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO deleted_readings (at)
+		SELECT at FROM readings WHERE at BETWEEN ? AND ?`, from, to); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM readings WHERE at BETWEEN ? AND ?", from, to)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) http.Handler {
 	mux := http.NewServeMux()
 	assets, _ := fs.Sub(dashboardFiles, "web")
@@ -230,6 +259,22 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 			return
 		}
 		sendJSON(w, points)
+	})
+	mux.HandleFunc("DELETE /api/readings", func(w http.ResponseWriter, r *http.Request) {
+		from, fromErr := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
+		to, toErr := strconv.ParseInt(r.URL.Query().Get("to"), 10, 64)
+		if fromErr != nil || toErr != nil || from < 0 || to <= from || to > 9223372036853 {
+			http.Error(w, "Expected a valid from/to range in milliseconds", http.StatusBadRequest)
+			return
+		}
+		deleted, err := deleteHistoryBetween(r.Context(), db,
+			from*int64(time.Millisecond), (to+1)*int64(time.Millisecond)-1)
+		if err != nil {
+			log.Print(err)
+			http.Error(w, "Could not delete history", http.StatusInternalServerError)
+			return
+		}
+		sendJSON(w, map[string]int64{"deleted": deleted})
 	})
 	return mux
 }

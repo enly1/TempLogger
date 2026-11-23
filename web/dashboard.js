@@ -197,9 +197,10 @@ function render({canvas, field, color}) {
   if (drag && drag.canvas === canvas) {
     const startX = Math.max(left, Math.min(right, drag.startX));
     const endX = Math.max(left, Math.min(right, drag.currentX));
-    ctx.fillStyle = 'rgba(141, 188, 240, 0.18)';
+    const color = drag.operation === 'delete' ? '#f08b82' : '#8dbcf0';
+    ctx.fillStyle = drag.operation === 'delete' ? 'rgba(240, 139, 130, 0.2)' : 'rgba(141, 188, 240, 0.18)';
     ctx.fillRect(Math.min(startX, endX), top, Math.abs(endX - startX), bottom - top);
-    ctx.strokeStyle = '#8dbcf0';
+    ctx.strokeStyle = color;
     ctx.lineWidth = 1;
     ctx.strokeRect(Math.min(startX, endX), top, Math.abs(endX - startX), bottom - top);
   }
@@ -210,6 +211,23 @@ function setChartMode(mode) {
   get('smooth-mode').setAttribute('aria-pressed', mode === 'smooth');
   get('raw-mode').setAttribute('aria-pressed', mode === 'raw');
   draw();
+}
+
+async function confirmDeleteReadings(from, to) {
+  const formatter = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'medium'});
+  if (!window.confirm(`Permanently delete recorded readings from ${formatter.format(from)} through ${formatter.format(to)}? This cannot be undone.`)) return;
+  try {
+    const response = await fetch('/api/readings?from=' + from + '&to=' + to, {method: 'DELETE'});
+    if (!response.ok) throw new Error('Could not delete readings');
+    const result = await response.json();
+    displayed = null;
+    cursor = null;
+    axisLimits = {};
+    await refresh();
+    get('detail').textContent = `Deleted ${result.deleted} reading${result.deleted === 1 ? '' : 's'}.`;
+  } catch (error) {
+    get('status').textContent = error.message;
+  }
 }
 
 function navigate() {
@@ -262,11 +280,18 @@ for (const {canvas} of charts) {
     return displayed.from + fraction * (displayed.to - displayed.from);
   };
   canvas.addEventListener('pointerdown', event => {
-    if (!displayed || event.button !== 0) return;
+    if (!displayed || (event.button !== 0 && event.button !== 2)) return;
+    const operation = event.button === 2 ? 'delete' : 'zoom';
+    if (operation === 'delete' && mockMode) {
+      get('status').textContent = 'Turn off Mock data before deleting recorded readings';
+      event.preventDefault();
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
     if (x < 48 || x > canvas.clientWidth - 14) return;
-    drag = {canvas, startX: x, currentX: x, startAt: timeAt(event.clientX), currentAt: timeAt(event.clientX)};
+    if (operation === 'delete') event.preventDefault();
+    drag = {canvas, operation, startX: x, currentX: x, startAt: timeAt(event.clientX), currentAt: timeAt(event.clientX)};
     cursor = null;
     canvas.setPointerCapture(event.pointerId);
     draw();
@@ -294,6 +319,10 @@ for (const {canvas} of charts) {
       const from = Math.max(displayed.from, Math.floor(Math.min(selection.startAt, selection.currentAt)));
       const to = Math.min(displayed.to, Math.ceil(Math.max(selection.startAt, selection.currentAt)));
       if (to - from >= 1000) {
+        if (selection.operation === 'delete') {
+          void confirmDeleteReadings(from, to);
+          return;
+        }
         span = to - from;
         range = -1;
         pinnedEnd = to;
@@ -305,6 +334,7 @@ for (const {canvas} of charts) {
     draw();
   });
   canvas.addEventListener('pointercancel', () => { drag = null; draw(); });
+  canvas.addEventListener('contextmenu', event => event.preventDefault());
   canvas.addEventListener('pointerleave', () => { if (!drag) { cursor = null; draw(); } });
   new ResizeObserver(refresh).observe(canvas);
 }
