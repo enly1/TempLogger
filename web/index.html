@@ -31,14 +31,19 @@
           <button data-range="0">All</button>
         </nav>
         <div class="controls">
+          <div class="chart-mode" role="group" aria-label="Chart rendering">
+            <button id="smooth-mode" aria-pressed="true">Smooth</button>
+            <button id="raw-mode" aria-pressed="false">Raw</button>
+          </div>
+          <button id="mock-mode" aria-pressed="false">Mock data</button>
           <button id="earlier" aria-label="Earlier readings" title="Earlier readings">←</button>
           <button id="later" aria-label="Later readings" title="Later readings">→</button>
           <button id="zoom" aria-label="Zoom in" title="Zoom in">＋</button>
           <button id="live" aria-pressed="true">Live</button>
         </div>
       </div>
-      <figure><figcaption>Temperature <small>°C</small></figcaption><canvas id="temp-chart" role="img" aria-label="Temperature over time"></canvas></figure>
-      <figure><figcaption>Humidity <small>%</small></figcaption><canvas id="humidity-chart" role="img" aria-label="Humidity over time"></canvas></figure>
+      <figure><figcaption>Temperature <small>°C</small></figcaption><canvas id="temp-chart" role="img" aria-label="Temperature over time; drag to zoom"></canvas></figure>
+      <figure><figcaption>Humidity <small>%</small></figcaption><canvas id="humidity-chart" role="img" aria-label="Humidity over time; drag to zoom"></canvas></figure>
       <footer><span id="window"></span><output id="detail"></output></footer>
     </section>
   </main>

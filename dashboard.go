@@ -116,12 +116,23 @@ func initHistory(ctx context.Context, db *sql.DB, csvPath string) error {
 }
 
 func historyBetween(ctx context.Context, db *sql.DB, from, to int64, gap time.Duration) ([]dashboardReading, error) {
+	return historyBetweenWithBuckets(ctx, db, from, to, gap, 750)
+}
+
+func historyBetweenWithBuckets(ctx context.Context, db *sql.DB, from, to int64, gap time.Duration, targetBuckets int64) ([]dashboardReading, error) {
 	// Keep long ranges small. Each populated time bucket retains actual readings
-	// at its endpoints and at temperature and humidity extremes.
-	bucket := max(int64(1), (to-from)/750)
+	// at its endpoints and at temperature and humidity extremes. Short ranges
+	// also retain at least 60 evenly distributed actual readings when available.
+	targetBuckets = max(int64(1), targetBuckets)
+	bucket := max(int64(1), (to-from)/targetBuckets)
+	minimumSamples := 0
+	if to-from < int64(time.Hour) {
+		minimumSamples = 60
+	}
 	rows, err := db.QueryContext(ctx, `
-		WITH chronological AS (
-			SELECT *, at - LAG(at) OVER (ORDER BY at) AS elapsed
+		WITH RECURSIVE chronological AS (
+			SELECT *, at - LAG(at) OVER (ORDER BY at) AS elapsed,
+				ROW_NUMBER() OVER (ORDER BY at) AS position, COUNT(*) OVER () AS total_rows
 			FROM readings WHERE at BETWEEN ? AND ?
 		), bins AS (
 			SELECT *, at / ? AS bucket,
@@ -133,16 +144,22 @@ func historyBetween(ctx context.Context, db *sql.DB, from, to int64, gap time.Du
 				MIN(temperature) OVER bin AS low_temp, MAX(temperature) OVER bin AS high_temp,
 				MIN(humidity) OVER bin AS low_humidity, MAX(humidity) OVER bin AS high_humidity
 			FROM bins WINDOW bin AS (PARTITION BY bucket)
+		), targets(n) AS (
+			SELECT 1 WHERE ? > 0
+			UNION ALL SELECT n + 1 FROM targets WHERE n < ?
 		), selected AS (
 			SELECT first AS at FROM bounds UNION SELECT last FROM bounds
 			UNION SELECT MIN(at) FROM bounds WHERE temperature = low_temp GROUP BY bucket
 			UNION SELECT MIN(at) FROM bounds WHERE temperature = high_temp GROUP BY bucket
 			UNION SELECT MIN(at) FROM bounds WHERE humidity = low_humidity GROUP BY bucket
 			UNION SELECT MIN(at) FROM bounds WHERE humidity = high_humidity GROUP BY bucket
+			UNION SELECT at FROM chronological JOIN targets
+				ON position = (targets.n * total_rows + 59) / 60
+				WHERE total_rows >= 60
 		)
 		SELECT bounds.at, temperature, humidity, battery, millivolts, rssi, segment
 		FROM selected JOIN bounds ON bounds.at = selected.at ORDER BY bounds.at
-	`, from, to, bucket, gap.Nanoseconds())
+	`, from, to, bucket, gap.Nanoseconds(), minimumSamples, minimumSamples)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +214,16 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 			http.Error(w, "Expected a valid from/to range in milliseconds", http.StatusBadRequest)
 			return
 		}
-		points, err := historyBetween(r.Context(), db, from*int64(time.Millisecond), (to+1)*int64(time.Millisecond)-1, max(90*time.Second, interval*3))
+		targetBuckets := int64(750)
+		if rawBuckets := r.URL.Query().Get("buckets"); rawBuckets != "" {
+			parsed, err := strconv.ParseInt(rawBuckets, 10, 64)
+			if err != nil || parsed < 1 || parsed > 5000 {
+				http.Error(w, "Expected buckets between 1 and 5000", http.StatusBadRequest)
+				return
+			}
+			targetBuckets = parsed
+		}
+		points, err := historyBetweenWithBuckets(r.Context(), db, from*int64(time.Millisecond), (to+1)*int64(time.Millisecond)-1, max(90*time.Second, interval*3), targetBuckets)
 		if err != nil {
 			log.Print(err)
 			http.Error(w, "Could not read history", http.StatusInternalServerError)
