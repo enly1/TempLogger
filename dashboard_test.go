@@ -100,6 +100,32 @@ func TestHistoryBetweenUsesRequestedBucketResolution(t *testing.T) {
 	}
 }
 
+func TestHistoryBetweenPreservesBatteryExtremes(t *testing.T) {
+	db := historyDB(t)
+	window := int64(2 * time.Hour)
+	start := (int64(1_700_000_000_000_000_000) / window) * window
+	battery := []int{80, 75, 4, 99, 78}
+	for i, value := range battery {
+		if _, err := db.Exec(`INSERT INTO readings
+			(at, temperature, humidity, battery, millivolts, rssi) VALUES (?, 20, 50, ?, 2900, -60)`,
+			start+int64(i)*int64(time.Second), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	points, err := historyBetweenWithBuckets(context.Background(), db, start, start+window, 90*time.Second, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[int]bool{}
+	for _, point := range points {
+		found[point.Battery] = true
+	}
+	if !found[4] || !found[99] {
+		t.Fatalf("battery extremes missing from sampled points: %+v", points)
+	}
+}
+
 func TestDeleteHistoryBetweenDeletesRangeAndSuppressesCSVReimport(t *testing.T) {
 	db := historyDB(t)
 	start := int64(1_700_000_000_000_000_000)

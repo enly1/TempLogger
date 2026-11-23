@@ -3,7 +3,8 @@
 const get = id => document.getElementById(id);
 const charts = [
   {canvas: get('temp-chart'), field: 'temperature', color: '#72d7a9'},
-  {canvas: get('humidity-chart'), field: 'humidity', color: '#8dbcf0'}
+  {canvas: get('humidity-chart'), field: 'humidity', color: '#8dbcf0'},
+  {canvas: get('battery-chart'), field: 'battery', color: '#e6bc72'}
 ];
 const clock = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-digit', second: '2-digit'});
 const dateTime = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
@@ -30,7 +31,7 @@ function mockReadings(from, to, buckets) {
       at,
       temperature: 20.5 + 2.2 * Math.sin(seconds * Math.PI / 43200) + 0.45 * Math.sin(seconds * 2 * Math.PI / 90),
       humidity: Math.round(54 + 10 * Math.cos(seconds * Math.PI / 36000) + 3 * Math.sin(seconds * 2 * Math.PI / 120)),
-      battery: 86, millivolts: 2900, rssi: -63,
+      battery: Math.round(85 + 6 * Math.cos(seconds * 2 * Math.PI / 21600)), millivolts: 2900, rssi: -63,
       segment: fraction >= 0.68 ? 1 : 0
     });
   }
@@ -48,7 +49,7 @@ function mockReadings(from, to, buckets) {
       at,
       temperature: 20.5 + 2.2 * Math.sin(seconds * Math.PI / 43200) + 0.45 * Math.sin(seconds * 2 * Math.PI / 90),
       humidity: Math.round(54 + 10 * Math.cos(seconds * Math.PI / 36000) + 3 * Math.sin(seconds * 2 * Math.PI / 120)),
-      battery: 86, millivolts: 2900, rssi: -63,
+      battery: Math.round(85 + 6 * Math.cos(seconds * 2 * Math.PI / 21600)), millivolts: 2900, rssi: -63,
       segment: fraction >= 0.68 ? 1 : 0
     });
   }
@@ -109,7 +110,7 @@ async function refresh() {
 function draw() {
   for (const chart of charts) render(chart);
   get('detail').textContent = cursor
-    ? clock.format(cursor.at) + ' · ' + cursor.temperature.toFixed(1) + ' °C · ' + cursor.humidity + '% RH'
+    ? clock.format(cursor.at) + ' · ' + cursor.temperature.toFixed(1) + ' °C · ' + cursor.humidity + '% RH · ' + cursor.battery + '% battery'
     : '';
 }
 

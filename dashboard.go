@@ -147,7 +147,8 @@ func historyBetweenWithBuckets(ctx context.Context, db *sql.DB, from, to int64, 
 			SELECT *,
 				MIN(at) OVER bin AS first, MAX(at) OVER bin AS last,
 				MIN(temperature) OVER bin AS low_temp, MAX(temperature) OVER bin AS high_temp,
-				MIN(humidity) OVER bin AS low_humidity, MAX(humidity) OVER bin AS high_humidity
+				MIN(humidity) OVER bin AS low_humidity, MAX(humidity) OVER bin AS high_humidity,
+				MIN(battery) OVER bin AS low_battery, MAX(battery) OVER bin AS high_battery
 			FROM bins WINDOW bin AS (PARTITION BY bucket)
 		), targets(n) AS (
 			SELECT 1 WHERE ? > 0
@@ -158,6 +159,8 @@ func historyBetweenWithBuckets(ctx context.Context, db *sql.DB, from, to int64, 
 			UNION SELECT MIN(at) FROM bounds WHERE temperature = high_temp GROUP BY bucket
 			UNION SELECT MIN(at) FROM bounds WHERE humidity = low_humidity GROUP BY bucket
 			UNION SELECT MIN(at) FROM bounds WHERE humidity = high_humidity GROUP BY bucket
+			UNION SELECT MIN(at) FROM bounds WHERE battery = low_battery GROUP BY bucket
+			UNION SELECT MIN(at) FROM bounds WHERE battery = high_battery GROUP BY bucket
 			UNION SELECT at FROM chronological JOIN targets
 				ON position = (targets.n * total_rows + 59) / 60
 				WHERE total_rows >= 60
