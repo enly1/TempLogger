@@ -39,6 +39,21 @@ type reading struct {
 	Counter                             uint8
 }
 
+type sensorObservation struct {
+	Time        time.Time
+	DeviceID    string
+	Name        string
+	Format      string
+	Temperature *float64
+	Humidity    *float64
+	Battery     *float64
+	Millivolts  *float64
+	RSSI        int
+	Counter     *uint8
+}
+
+func floatPtr(value float64) *float64 { return &value }
+
 func decodeATC(p []byte, rssi int) (reading, bool) {
 	return decodeATCNamed(p, rssi, "")
 }
@@ -480,6 +495,531 @@ func decodeLegacyProxyAdvertisement(adv *pb.BluetoothLEAdvertisementResponse) (r
 	return reading{}, false
 }
 
+type scanServiceData struct {
+	UUID string
+	Data []byte
+}
+
+type scanManufacturerData struct {
+	ID   string
+	Data []byte
+}
+
+type scanAdvertisement struct {
+	Address          string
+	RSSI             int
+	Name             string
+	Raw              []byte
+	ServiceUUIDs     []string
+	ServiceData      []scanServiceData
+	ManufacturerData []scanManufacturerData
+}
+
+func canonicalScanUUID(uuid string) string {
+	uuid = strings.ToLower(strings.TrimSpace(uuid))
+	if len(uuid) == 36 && strings.HasPrefix(uuid, "0000") && strings.HasSuffix(uuid, "-0000-1000-8000-00805f9b34fb") {
+		return uuid[4:8]
+	}
+	if len(uuid) == 8 && strings.HasPrefix(uuid, "0000") {
+		return uuid[4:]
+	}
+	return uuid
+}
+
+func littleEndianUUID128(data []byte) string {
+	if len(data) != 16 {
+		return ""
+	}
+	value := append([]byte(nil), data...)
+	for left, right := 0, len(value)-1; left < right; left, right = left+1, right-1 {
+		value[left], value[right] = value[right], value[left]
+	}
+	return fmt.Sprintf("%x-%x-%x-%x-%x", value[0:4], value[4:6], value[6:8], value[8:10], value[10:16])
+}
+
+func formatScanAdvertisement(adv scanAdvertisement) (string, string) {
+	address := adv.Address
+	var serviceUUIDs, serviceData, manufacturerData, decodedReadings []string
+	key := address
+	if len(adv.ServiceUUIDs) > 0 {
+		for _, uuid := range adv.ServiceUUIDs {
+			uuid = canonicalScanUUID(uuid)
+			serviceUUIDs = append(serviceUUIDs, uuid)
+			key += "|u:" + uuid
+		}
+	}
+	for _, service := range adv.ServiceData {
+		uuid := canonicalScanUUID(service.UUID)
+		data := append([]byte(nil), service.Data...)
+		key += fmt.Sprintf("|s:%s:%x", uuid, data)
+		serviceData = append(serviceData, fmt.Sprintf("%s=%x", uuid, data))
+		if advertised := advertisedScanMAC(uuid, data); advertised != "" {
+			address = advertised
+		}
+		if summary := decodeBroadcastTemperature(uuid, data); summary != "" {
+			decodedReadings = append(decodedReadings, summary)
+		}
+	}
+	for _, manufacturer := range adv.ManufacturerData {
+		data := append([]byte(nil), manufacturer.Data...)
+		key += fmt.Sprintf("|m:%s:%x", manufacturer.ID, data)
+		manufacturerData = append(manufacturerData, fmt.Sprintf("%s=%x", manufacturer.ID, data))
+	}
+	if len(adv.ServiceUUIDs)+len(adv.ServiceData)+len(adv.ManufacturerData) == 0 {
+		key += fmt.Sprintf("|raw:%x", adv.Raw)
+	}
+	if len(decodedReadings) == 0 {
+		decodedReadings = []string{"none detected"}
+	}
+	name := adv.Name
+	if name == "" {
+		name = "<none>"
+	}
+	raw := "unavailable"
+	if len(adv.Raw) > 0 {
+		raw = fmt.Sprintf("%x", adv.Raw)
+	}
+	line := fmt.Sprintf("Address: %s | Scanner ID: %s | RSSI: %d dBm | Name: %s | Raw AD: %s | Service UUIDs: %s | Service data: %s | Manufacturer data: %s | Decoded: %s",
+		address, adv.Address, adv.RSSI, name, raw, scanFieldValue(serviceUUIDs), scanFieldValue(serviceData), scanFieldValue(manufacturerData), strings.Join(decodedReadings, "; "))
+	return key, line
+}
+
+func scanFieldValue(values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	return strings.Join(values, ", ")
+}
+
+func advertisedScanMAC(uuid string, data []byte) string {
+	uuid = canonicalScanUUID(uuid)
+	switch uuid {
+	case "181a":
+		if len(data) >= 6 {
+			return fmt.Sprintf("%02X%02X%02X%02X%02X%02X", data[0], data[1], data[2], data[3], data[4], data[5])
+		}
+	case "fe95":
+		if len(data) < 11 || binary.LittleEndian.Uint16(data[:2])&0x10 == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%02X%02X%02X%02X%02X%02X", data[10], data[9], data[8], data[7], data[6], data[5])
+	}
+	return ""
+}
+
+func decodeBroadcastTemperature(uuid string, data []byte) string {
+	uuid = canonicalScanUUID(uuid)
+	switch uuid {
+	case "181a":
+		switch len(data) {
+		case 13: // ATC service data
+			temp := float64(int16(binary.BigEndian.Uint16(data[6:8]))) / 10
+			return fmt.Sprintf("ATC temperature %.1f°C, humidity %d%%, battery %d%% (%d mV)", temp, data[8], data[9], binary.BigEndian.Uint16(data[10:12]))
+		case 15: // PVVX custom service data
+			temp := float64(int16(binary.LittleEndian.Uint16(data[6:8]))) / 100
+			humidity := float64(binary.LittleEndian.Uint16(data[8:10])) / 100
+			return fmt.Sprintf("PVVX temperature %.2f°C, humidity %.2f%%, battery %d%% (%d mV)", temp, humidity, data[12], binary.LittleEndian.Uint16(data[10:12]))
+		}
+	case "fcd2":
+		return decodeBTHomeTemperature(data)
+	case "fe95":
+		decoded, _ := decodeXiaomiMiBeacon(data)
+		return decoded
+	}
+	return ""
+}
+
+func decodeXiaomiMiBeacon(data []byte) (decoded, advertisedMAC string) {
+	if len(data) < 5 {
+		return "", ""
+	}
+	control := binary.LittleEndian.Uint16(data[:2])
+	productID := binary.LittleEndian.Uint16(data[2:4])
+	version := (control >> 12) & 0x0f
+	model := map[uint16]string{0x01aa: "LYWSDCGQ", 0x045b: "LYWSD02", 0x055b: "LYWSD03MMC", 0x066f: "CGDK2", 0x06d3: "MHO-C303"}[productID]
+	label := fmt.Sprintf("Xiaomi MiBeacon v%d", version)
+	if model != "" {
+		label += " " + model
+	}
+	if control&0x08 != 0 {
+		return label + " (encrypted; bind key required to decode temperature)", ""
+	}
+	offset := 5
+	if control&0x10 != 0 {
+		if len(data) < offset+6 {
+			return "", ""
+		}
+		advertisedMAC = fmt.Sprintf("%02X%02X%02X%02X%02X%02X", data[offset+5], data[offset+4], data[offset+3], data[offset+2], data[offset+1], data[offset])
+		offset += 6
+	}
+	if control&0x20 != 0 {
+		if len(data) <= offset {
+			return "", advertisedMAC
+		}
+		offset++ // capability byte
+	}
+	if control&0x40 == 0 {
+		return label + " (no temperature object in this advertisement)", advertisedMAC
+	}
+	var values []string
+	for offset+3 <= len(data) {
+		objectID := binary.LittleEndian.Uint16(data[offset : offset+2])
+		length := int(data[offset+2])
+		offset += 3
+		if length == 0 || offset+length > len(data) {
+			break
+		}
+		payload := data[offset : offset+length]
+		offset += length
+		switch objectID {
+		case 0x1004:
+			if length == 2 {
+				values = append(values, fmt.Sprintf("temperature %.1f°C", float64(int16(binary.LittleEndian.Uint16(payload)))/10))
+			}
+		case 0x1006:
+			if length == 2 {
+				values = append(values, fmt.Sprintf("humidity %.1f%%", float64(binary.LittleEndian.Uint16(payload))/10))
+			}
+		case 0x100a:
+			if length == 1 {
+				values = append(values, fmt.Sprintf("battery %d%%", payload[0]))
+			}
+		case 0x100d:
+			if length == 4 {
+				values = append(values, fmt.Sprintf("temperature %.1f°C, humidity %.1f%%",
+					float64(int16(binary.LittleEndian.Uint16(payload[:2])))/10,
+					float64(binary.LittleEndian.Uint16(payload[2:]))/10))
+			}
+		}
+	}
+	if len(values) == 0 {
+		return label + " (no supported temperature object)", advertisedMAC
+	}
+	return label + " " + strings.Join(values, ", "), advertisedMAC
+}
+
+func decodeSensorObservations(adv scanAdvertisement) []sensorObservation {
+	observedAt := time.Now().UTC()
+	observations := make([]sensorObservation, 0, len(adv.ServiceData))
+	for _, service := range adv.ServiceData {
+		uuid := canonicalScanUUID(service.UUID)
+		data := service.Data
+		deviceID := adv.Address
+		if mac := advertisedScanMAC(uuid, data); mac != "" {
+			deviceID = mac
+		}
+		observation := sensorObservation{
+			Time: observedAt, DeviceID: deviceID, Name: adv.Name, RSSI: adv.RSSI,
+		}
+		switch {
+		case uuid == "181a" && len(data) == 13:
+			observation.Format = "ATC"
+			observation.Temperature = floatPtr(float64(int16(binary.BigEndian.Uint16(data[6:8]))) / 10)
+			observation.Humidity = floatPtr(float64(data[8]))
+			observation.Battery = floatPtr(float64(data[9]))
+			observation.Millivolts = floatPtr(float64(binary.BigEndian.Uint16(data[10:12])))
+			counter := data[12]
+			observation.Counter = &counter
+		case uuid == "181a" && len(data) == 15:
+			observation.Format = "PVVX"
+			observation.Temperature = floatPtr(float64(int16(binary.LittleEndian.Uint16(data[6:8]))) / 100)
+			observation.Humidity = floatPtr(float64(binary.LittleEndian.Uint16(data[8:10])) / 100)
+			observation.Battery = floatPtr(float64(data[12]))
+			observation.Millivolts = floatPtr(float64(binary.LittleEndian.Uint16(data[10:12])))
+		case uuid == "fcd2":
+			observation = decodeBTHomeObservation(data, observation)
+		case uuid == "fe95":
+			observation = decodeXiaomiObservation(data, observation)
+		default:
+			continue
+		}
+		if observation.Format != "" && (observation.Temperature != nil || observation.Humidity != nil || observation.Battery != nil || observation.Millivolts != nil) {
+			observations = append(observations, observation)
+		}
+	}
+	return observations
+}
+
+func decodeBTHomeObservation(data []byte, observation sensorObservation) sensorObservation {
+	if len(data) < 2 || data[0]>>5 != 2 || data[0]&1 != 0 {
+		return sensorObservation{}
+	}
+	observation.Format = "BTHome v2"
+	for i := 1; i < len(data); {
+		objectID := data[i]
+		i++
+		length, signed := 0, false
+		switch objectID {
+		case 0x00, 0x01, 0x2e:
+			length = 1
+		case 0x02, 0x03, 0x0c:
+			length = 2
+			signed = objectID == 0x02
+		default:
+			return observation
+		}
+		if i+length > len(data) {
+			return sensorObservation{}
+		}
+		var value int64
+		if length == 1 {
+			value = int64(data[i])
+		} else if signed {
+			value = int64(int16(binary.LittleEndian.Uint16(data[i : i+length])))
+		} else {
+			value = int64(binary.LittleEndian.Uint16(data[i : i+length]))
+		}
+		i += length
+		switch objectID {
+		case 0x00:
+			counter := uint8(value)
+			observation.Counter = &counter
+		case 0x01:
+			observation.Battery = floatPtr(float64(value))
+		case 0x02:
+			observation.Temperature = floatPtr(float64(value) / 100)
+		case 0x03:
+			observation.Humidity = floatPtr(float64(value) / 100)
+		case 0x0c:
+			observation.Millivolts = floatPtr(float64(value))
+		case 0x2e:
+			observation.Humidity = floatPtr(float64(value))
+		}
+	}
+	return observation
+}
+
+func decodeXiaomiObservation(data []byte, observation sensorObservation) sensorObservation {
+	if len(data) < 5 {
+		return sensorObservation{}
+	}
+	control := binary.LittleEndian.Uint16(data[:2])
+	productID := binary.LittleEndian.Uint16(data[2:4])
+	if control&0x08 != 0 {
+		return sensorObservation{}
+	}
+	models := map[uint16]string{0x01aa: "LYWSDCGQ", 0x045b: "LYWSD02", 0x055b: "LYWSD03MMC", 0x066f: "CGDK2", 0x06d3: "MHO-C303"}
+	observation.Format = "Xiaomi MiBeacon"
+	if observation.Name == "" {
+		observation.Name = models[productID]
+	}
+	offset := 5
+	if control&0x10 != 0 {
+		if len(data) < offset+6 {
+			return sensorObservation{}
+		}
+		observation.DeviceID = fmt.Sprintf("%02X%02X%02X%02X%02X%02X", data[offset+5], data[offset+4], data[offset+3], data[offset+2], data[offset+1], data[offset])
+		offset += 6
+	}
+	if control&0x20 != 0 {
+		if len(data) <= offset {
+			return sensorObservation{}
+		}
+		offset++
+	}
+	if control&0x40 == 0 {
+		return sensorObservation{}
+	}
+	for offset+3 <= len(data) {
+		objectID := binary.LittleEndian.Uint16(data[offset : offset+2])
+		length := int(data[offset+2])
+		offset += 3
+		if length == 0 || offset+length > len(data) {
+			return sensorObservation{}
+		}
+		payload := data[offset : offset+length]
+		offset += length
+		switch objectID {
+		case 0x1004:
+			if length == 2 {
+				observation.Temperature = floatPtr(float64(int16(binary.LittleEndian.Uint16(payload))) / 10)
+			}
+		case 0x1006:
+			if length == 2 {
+				observation.Humidity = floatPtr(float64(binary.LittleEndian.Uint16(payload)) / 10)
+			}
+		case 0x100a:
+			if length == 1 {
+				observation.Battery = floatPtr(float64(payload[0]))
+			}
+		case 0x100d:
+			if length == 4 {
+				observation.Temperature = floatPtr(float64(int16(binary.LittleEndian.Uint16(payload[:2]))) / 10)
+				observation.Humidity = floatPtr(float64(binary.LittleEndian.Uint16(payload[2:])) / 10)
+			}
+		}
+	}
+	counter := data[4]
+	observation.Counter = &counter
+	return observation
+}
+
+func decodeBTHomeTemperature(data []byte) string {
+	if len(data) < 2 || data[0]>>5 != 2 || data[0]&1 != 0 {
+		return ""
+	}
+	var fields []string
+	hasTemperature := false
+	for i := 1; i < len(data); {
+		objectID := data[i]
+		i++
+		length, signed, label, scale := 0, false, "", 1.0
+		switch objectID {
+		case 0x00:
+			length, label = 1, "packet"
+		case 0x01:
+			length, label = 1, "battery"
+		case 0x02:
+			length, signed, label, scale = 2, true, "temperature", 100
+		case 0x03:
+			length, label, scale = 2, "humidity", 100
+		case 0x0c:
+			length, label = 2, "voltage"
+		case 0x2e:
+			length, label = 1, "humidity"
+		default:
+			i = len(data)
+			continue
+		}
+		if i+length > len(data) {
+			return ""
+		}
+		var value int64
+		if length == 1 {
+			value = int64(data[i])
+		} else if signed {
+			value = int64(int16(binary.LittleEndian.Uint16(data[i : i+length])))
+		} else {
+			value = int64(binary.LittleEndian.Uint16(data[i : i+length]))
+		}
+		i += length
+		if label == "temperature" {
+			hasTemperature = true
+		}
+		if scale == 1 {
+			fields = append(fields, fmt.Sprintf("%s %d", label, value))
+		} else {
+			fields = append(fields, fmt.Sprintf("%s %.2f", label, float64(value)/scale))
+		}
+	}
+	if !hasTemperature {
+		return ""
+	}
+	return "BTHome v2 " + strings.Join(fields, ", ")
+}
+
+func parseRawScanAdvertisement(data []byte) (name string, serviceUUIDs []string, services []scanServiceData, manufacturers []scanManufacturerData) {
+	for len(data) > 0 {
+		fieldLen := int(data[0])
+		if fieldLen == 0 || fieldLen+1 > len(data) {
+			break
+		}
+		fieldType := data[1]
+		field := data[2 : fieldLen+1]
+		switch fieldType {
+		case 0x08, 0x09:
+			name = string(field)
+		case 0x02, 0x03:
+			for len(field) >= 2 {
+				uuid := binary.LittleEndian.Uint16(field[:2])
+				serviceUUIDs = append(serviceUUIDs, fmt.Sprintf("%04x", uuid))
+				field = field[2:]
+			}
+		case 0x04, 0x05:
+			for len(field) >= 4 {
+				serviceUUIDs = append(serviceUUIDs, fmt.Sprintf("%08x", binary.LittleEndian.Uint32(field[:4])))
+				field = field[4:]
+			}
+		case 0x06, 0x07:
+			for len(field) >= 16 {
+				serviceUUIDs = append(serviceUUIDs, littleEndianUUID128(field[:16]))
+				field = field[16:]
+			}
+		case 0x16:
+			if len(field) >= 2 {
+				services = append(services, scanServiceData{UUID: fmt.Sprintf("%04x", binary.LittleEndian.Uint16(field[:2])), Data: append([]byte(nil), field[2:]...)})
+			}
+		case 0x20:
+			if len(field) >= 4 {
+				services = append(services, scanServiceData{UUID: fmt.Sprintf("%08x", binary.LittleEndian.Uint32(field[:4])), Data: append([]byte(nil), field[4:]...)})
+			}
+		case 0x21:
+			if len(field) >= 16 {
+				services = append(services, scanServiceData{UUID: littleEndianUUID128(field[:16]), Data: append([]byte(nil), field[16:]...)})
+			}
+		case 0xff:
+			if len(field) >= 2 {
+				manufacturers = append(manufacturers, scanManufacturerData{ID: fmt.Sprintf("%04x", binary.LittleEndian.Uint16(field[:2])), Data: append([]byte(nil), field[2:]...)})
+			}
+		}
+		data = data[fieldLen+1:]
+	}
+	return
+}
+
+type scanOutput struct {
+	mu       sync.Mutex
+	indexes  map[string]int
+	readings []scanAdvertisement
+}
+
+func newScanOutput() *scanOutput {
+	return &scanOutput{indexes: make(map[string]int)}
+}
+
+func (out *scanOutput) add(adv scanAdvertisement) {
+	key, line := formatScanAdvertisement(adv)
+	out.mu.Lock()
+	defer out.mu.Unlock()
+	if index, exists := out.indexes[key]; exists {
+		previous := &out.readings[index]
+		enriched := false
+		if previous.Name == "" && adv.Name != "" {
+			previous.Name = adv.Name
+			enriched = true
+		}
+		if len(previous.Raw) == 0 && len(adv.Raw) > 0 {
+			previous.Raw = append([]byte(nil), adv.Raw...)
+			enriched = true
+		}
+		if adv.RSSI > previous.RSSI {
+			previous.RSSI = adv.RSSI
+		}
+		if enriched && index < 150 {
+			_, line = formatScanAdvertisement(*previous)
+			fmt.Println(line)
+		}
+		return
+	}
+	index := len(out.readings)
+	out.indexes[key] = index
+	out.readings = append(out.readings, adv)
+	if index < 150 {
+		fmt.Println(line)
+	}
+}
+
+func (out *scanOutput) printResults() {
+	out.mu.Lock()
+	defer out.mu.Unlock()
+	limit := min(len(out.readings), 150)
+	if len(out.readings) > limit {
+		fmt.Printf("... (%d additional distinct advertisements omitted)\n", len(out.readings)-limit)
+	}
+	fmt.Printf("Distinct advertisements: %d\n", len(out.readings))
+	if len(out.readings) == 0 {
+		fmt.Println("No BLE advertisements received; check adapter permissions, scan status, and sensor range.")
+	}
+}
+
+func scanResultError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		fmt.Println("Scan interrupted.")
+		return nil
+	}
+	return err
+}
+
 func scanProxy(ctx context.Context, host, encryptionKey string, duration time.Duration) error {
 	address := proxyAddress(host)
 	opts := []esphome.Option{esphome.WithClientInfo("TempLogger BLE scanner")}
@@ -493,69 +1033,106 @@ func scanProxy(ctx context.Context, host, encryptionKey string, duration time.Du
 	defer client.Close()
 	requestPassiveProxyScan(client)
 
-	var count int
-	seen := make(map[string]struct{})
-	var scanMu sync.Mutex
-	printAdvertisement := func(key string, line string) {
-		scanMu.Lock()
-		defer scanMu.Unlock()
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		count++
-		if count <= 150 {
-			fmt.Println(line)
-		}
-	}
+	output := newScanOutput()
+	fmt.Printf("Scanning BLE advertisements via ESPHome proxy %s for %s...\n", address, duration)
 	unsubscribe, err := subscribeProxyAdvertisements(client, func(msg proto.Message) {
 		switch batch := msg.(type) {
 		case *pb.BluetoothLERawAdvertisementsResponse:
 			for _, adv := range batch.Advertisements {
-				data := adv.Data
-				key := fmt.Sprintf("%012X:%x", adv.Address, data)
-				line := fmt.Sprintf("%012X  RSSI %d dBm  AD %x", adv.Address, adv.Rssi, data)
-				if r, ok := decodeProxyAdvertisement(data, int(adv.Rssi)); ok {
-					line += fmt.Sprintf("  => ATC %.1f°C %d%% RH battery %d%%", r.Temp, r.Humidity, r.Battery)
-				}
-				printAdvertisement(key, line)
+				name, uuids, services, manufacturers := parseRawScanAdvertisement(adv.Data)
+				output.add(scanAdvertisement{
+					Address: fmt.Sprintf("%012X", adv.Address), RSSI: int(adv.Rssi), Name: name,
+					Raw: append([]byte(nil), adv.Data...), ServiceUUIDs: uuids,
+					ServiceData: services, ManufacturerData: manufacturers,
+				})
 			}
 		case *pb.BluetoothLEAdvertisementResponse:
-			key := fmt.Sprintf("%012X:%x:%s", batch.Address, batch.Name, batch.String())
-			line := fmt.Sprintf("%012X  RSSI %d dBm  name %q  service data:", batch.Address, batch.Rssi, batch.Name)
+			adv := scanAdvertisement{Address: fmt.Sprintf("%012X", batch.Address), RSSI: int(batch.Rssi), Name: string(batch.Name)}
+			adv.ServiceUUIDs = append(adv.ServiceUUIDs, batch.ServiceUuids...)
 			for _, service := range batch.ServiceData {
-				line += fmt.Sprintf(" %s=%x", service.Uuid, service.Data)
+				adv.ServiceData = append(adv.ServiceData, scanServiceData{UUID: service.Uuid, Data: append([]byte(nil), service.Data...)})
 			}
-			if r, ok := decodeLegacyProxyAdvertisement(batch); ok {
-				line += fmt.Sprintf("  => ATC %.1f°C %d%% RH battery %d%%", r.Temp, r.Humidity, r.Battery)
+			for _, manufacturer := range batch.ManufacturerData {
+				adv.ManufacturerData = append(adv.ManufacturerData, scanManufacturerData{ID: manufacturer.Uuid, Data: append([]byte(nil), manufacturer.Data...)})
 			}
-			printAdvertisement(key, line)
+			output.add(adv)
 		}
 	})
 	if err != nil {
 		return err
 	}
-	defer unsubscribe()
-	fmt.Printf("Scanning BLE advertisements through %s for %s...\n", address, duration)
+	active := true
+	defer func() {
+		if active {
+			unsubscribe()
+		}
+	}()
 	timer := time.NewTimer(duration)
 	defer timer.Stop()
+	var scanErr error
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		scanErr = ctx.Err()
 	case <-client.Done():
-		return errors.New("proxy disconnected during scan")
+		scanErr = errors.New("proxy disconnected during scan")
 	case <-timer.C:
 	}
-	scanMu.Lock()
-	defer scanMu.Unlock()
-	if count > 150 {
-		fmt.Printf("... (%d additional distinct advertisements omitted)\n", count-150)
+	unsubscribe()
+	active = false
+	output.printResults()
+	return scanResultError(scanErr)
+}
+
+func scanLocalBLE(ctx context.Context, duration time.Duration) error {
+	adapter := bluetooth.DefaultAdapter
+	if err := adapter.Enable(); err != nil {
+		return fmt.Errorf("enabling local Bluetooth adapter: %w", err)
 	}
-	fmt.Printf("Scan complete: %d distinct advertisements received.\n", count)
-	if count == 0 {
-		fmt.Println("No BLE advertisements received; check proxy scan status and sensor range.")
+
+	output := newScanOutput()
+	fmt.Printf("Scanning BLE advertisements via local Bluetooth adapter for %s...\n", duration)
+	scanDone := make(chan error, 1)
+	go func() {
+		scanDone <- adapter.Scan(func(_ *bluetooth.Adapter, result bluetooth.ScanResult) {
+			adv := scanAdvertisement{
+				Address: result.Address.String(), RSSI: int(result.RSSI), Name: result.LocalName(),
+				Raw: append([]byte(nil), result.Bytes()...),
+			}
+			for _, uuid := range result.ServiceUUIDs() {
+				adv.ServiceUUIDs = append(adv.ServiceUUIDs, uuid.String())
+			}
+			for _, service := range result.ServiceData() {
+				adv.ServiceData = append(adv.ServiceData, scanServiceData{UUID: service.UUID.String(), Data: append([]byte(nil), service.Data...)})
+			}
+			for _, manufacturer := range result.ManufacturerData() {
+				adv.ManufacturerData = append(adv.ManufacturerData, scanManufacturerData{ID: fmt.Sprintf("%04x", manufacturer.CompanyID), Data: append([]byte(nil), manufacturer.Data...)})
+			}
+			output.add(adv)
+		})
+	}()
+
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	var scanErr error
+	select {
+	case <-ctx.Done():
+		_ = adapter.StopScan()
+		<-scanDone
+		scanErr = ctx.Err()
+	case err := <-scanDone:
+		if err == nil {
+			scanErr = errors.New("local Bluetooth scan stopped unexpectedly")
+		} else {
+			scanErr = fmt.Errorf("local Bluetooth scan: %w", err)
+		}
+	case <-timer.C:
+		_ = adapter.StopScan()
+		if err := <-scanDone; err != nil {
+			scanErr = fmt.Errorf("stopping local Bluetooth scan: %w", err)
+		}
 	}
-	return nil
+	output.printResults()
+	return scanResultError(scanErr)
 }
 
 // readSensorConfig connects briefly over the ESPHome proxy and asks the ATC
@@ -744,35 +1321,68 @@ func connectProxyDevice(client *esphome.Client, address uint64, addressType uint
 	}
 }
 
-func streamProxyLogs(ctx context.Context, host, encryptionKey string) error {
-	address := proxyAddress(host)
-	opts := []esphome.Option{esphome.WithClientInfo("TempLogger proxy log viewer")}
-	if encryptionKey != "" {
-		opts = append(opts, esphome.WithEncryptionKey(encryptionKey))
-	}
-	client, err := esphome.DialWithContext(ctx, address, 5*time.Second, opts...)
-	if err != nil {
-		return fmt.Errorf("connecting to ESPHome proxy %s: %w", address, err)
-	}
-	defer client.Close()
-	fmt.Printf("Connected to ESPHome proxy %s; subscribing to verbose device logs.\n", address)
-	unsubscribe, err := client.SubscribeLogs(pb.LogLevel_LOG_LEVEL_VERBOSE, func(msg *pb.SubscribeLogsResponse) {
-		fmt.Printf("[%s] %s", msg.Level, string(msg.Message))
-		if len(msg.Message) == 0 || msg.Message[len(msg.Message)-1] != '\n' {
-			fmt.Println()
-		}
-	})
-	if err != nil {
-		return fmt.Errorf("subscribing to proxy logs: %w", err)
-	}
-	defer unsubscribe()
-	fmt.Printf("Streaming ESPHome logs from %s; press Ctrl-C to stop.\n", address)
+func waitProxyReconnect(ctx context.Context, address string) bool {
+	log.Printf("Proxy connection lost; reconnecting to %s in 5 seconds", address)
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return nil
-	case <-client.Done():
-		return errors.New("proxy disconnected while streaming logs")
+		return false
+	case <-timer.C:
 	}
+	log.Printf("Attempting ESPHome proxy reconnect to %s", address)
+	return true
+}
+
+func streamProxyLogs(ctx context.Context, host, encryptionKey string) error {
+	address := proxyAddress(host)
+	fmt.Printf("Streaming ESPHome logs from %s; press Ctrl-C to stop.\n", address)
+	for ctx.Err() == nil {
+		opts := []esphome.Option{esphome.WithClientInfo("TempLogger proxy log viewer")}
+		if encryptionKey != "" {
+			opts = append(opts, esphome.WithEncryptionKey(encryptionKey))
+		}
+		client, err := esphome.DialWithContext(ctx, address, 5*time.Second, opts...)
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			log.Printf("ESPHome Bluetooth proxy %s: failed to connect: %v (check that TCP 6053 is reachable and the API encryption key is correct)", address, err)
+			if !waitProxyReconnect(ctx, address) {
+				break
+			}
+			continue
+		}
+		fmt.Printf("Connected to ESPHome proxy %s; subscribing to verbose device logs.\n", address)
+		unsubscribe, err := client.SubscribeLogs(pb.LogLevel_LOG_LEVEL_VERBOSE, func(msg *pb.SubscribeLogsResponse) {
+			fmt.Printf("[%s] %s", msg.Level, string(msg.Message))
+			if len(msg.Message) == 0 || msg.Message[len(msg.Message)-1] != '\n' {
+				fmt.Println()
+			}
+		})
+		if err != nil {
+			log.Printf("Subscribing to proxy logs failed: %v", err)
+			_ = client.Close()
+			if !waitProxyReconnect(ctx, address) {
+				break
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			unsubscribe()
+			_ = client.Close()
+			return nil
+		case <-client.Done():
+			unsubscribe()
+			_ = client.Close()
+			log.Printf("ESPHome proxy log connection closed")
+		}
+		if !waitProxyReconnect(ctx, address) {
+			break
+		}
+	}
+	return nil
 }
 
 func collectProxy(ctx context.Context, host, encryptionKey string, interval time.Duration, save func(reading) error, events chan<- event, monitor, logPackets bool) {
@@ -796,15 +1406,9 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 				return
 			}
 			log.Printf("ESPHome Bluetooth proxy %s: failed to connect: %v (check that TCP 6053 is reachable and the API encryption key is correct)", address, err)
-			log.Printf("Proxy connection lost; retrying %s in 5 seconds", address)
-			timer := time.NewTimer(5 * time.Second)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitProxyReconnect(ctx, address) {
 				return
-			case <-timer.C:
 			}
-			log.Printf("Attempting ESPHome proxy reconnect to %s", address)
 			continue
 		}
 
@@ -813,7 +1417,7 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 		var lastAdvertisement atomic.Int64
 		lastAdvertisement.Store(connectedAt.UnixNano())
 		requestPassiveProxyScan(client)
-		unsubscribe, err := subscribeProxyAdvertisements(client, func(msg proto.Message) {
+		handler := func(msg proto.Message) {
 			handle := func(r reading, ok bool) {
 				if !ok {
 					return
@@ -842,11 +1446,19 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 			case *pb.BluetoothLEAdvertisementResponse:
 				handle(decodeLegacyProxyAdvertisement(batch))
 			}
-		})
+		}
+		unsubscribe, err := subscribeProxyAdvertisements(client, handler)
 		if err != nil {
+			if ctx.Err() != nil {
+				_ = client.Close()
+				return
+			}
+			log.Printf("Subscribing to BLE advertisements via %s failed: %v", address, err)
 			_ = client.Close()
-			events <- event{err: fmt.Errorf("subscribing to proxy advertisements: %w", err)}
-			return
+			if !waitProxyReconnect(ctx, address) {
+				return
+			}
+			continue
 		}
 		log.Printf("Subscribed to BLE advertisements via %s; waiting for ATC_EA80E1 packets", address)
 
@@ -865,7 +1477,17 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 				last := time.Unix(0, lastAdvertisement.Load())
 				idle := time.Since(last).Round(time.Second)
 				if idle >= 30*time.Second {
-					log.Printf("BLE stream is connected but no valid ATC_EA80E1 packet has arrived for %s (last packet %s)", idle, last.Format(time.RFC3339))
+					log.Printf("No valid ATC_EA80E1 packet received for %s; refreshing BLE subscription", idle)
+					unsubscribe()
+					// Another BLE client may have replaced this subscription while the
+					// API connection stayed open. Re-register the handlers and send a
+					// fresh subscribe request without dropping the proxy connection.
+					lastAdvertisement.Store(time.Now().UnixNano())
+					unsubscribe, err = subscribeProxyAdvertisements(client, handler)
+					if err != nil {
+						log.Printf("Refreshing BLE advertisement subscription via %s failed: %v", address, err)
+						connected = false
+					}
 				}
 			case r := <-packets:
 				if lastSaved.IsZero() || r.Time.Sub(lastSaved) >= interval {
@@ -890,15 +1512,9 @@ func collectProxy(ctx context.Context, host, encryptionKey string, interval time
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("Proxy connection lost; reconnecting to %s in 5 seconds", address)
-		timer := time.NewTimer(5 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !waitProxyReconnect(ctx, address) {
 			return
-		case <-timer.C:
 		}
-		log.Printf("Attempting ESPHome proxy reconnect to %s", address)
 	}
 }
 
@@ -1114,7 +1730,8 @@ func main() {
 	proxyKey := flag.String("proxy-key", os.Getenv("ESPHOME_API_KEY"), "ESPHome API encryption key (or set ESPHOME_API_KEY)")
 	localBLE := flag.Bool("local-ble", false, "scan with this computer's Bluetooth adapter instead of the proxy")
 	scan := flag.Bool("scan", false, "list nearby BLE advertisements received through the proxy, then exit")
-	scanSeconds := flag.Float64("scan-seconds", 30, "scan duration in seconds for --scan")
+	scanLocal := flag.Bool("scan-local", false, "list nearby BLE advertisements using the local Bluetooth adapter, then exit")
+	scanSeconds := flag.Float64("scan-seconds", 30, "scan duration in seconds for --scan or --scan-local")
 	proxyLogs := flag.Bool("proxy-logs", false, "stream ESPHome proxy logs, then exit")
 	sensorConfig := flag.Bool("sensor-config", false, "read current ATC sensor settings through the proxy, then exit")
 	sensorATC1441Defaults := flag.Bool("sensor-atc1441-defaults", false, "send ATC1441 restore-defaults (DE) and save (DF) through the proxy")
@@ -1123,8 +1740,9 @@ func main() {
 	bind := flag.String("bind", "127.0.0.1", "dashboard listen address")
 	db := flag.String("db", "readings.sqlite", "SQLite database for dashboard mode")
 	flag.Parse()
-	if (*scan && *proxyLogs) || ((*sensorConfig || *sensorATC1441Defaults) && (*scan || *proxyLogs)) || (*sensorConfig && *sensorATC1441Defaults) {
-		fmt.Fprintln(os.Stderr, "--scan, --proxy-logs, --sensor-config, and --sensor-atc1441-defaults are separate modes")
+	if (*scan && *scanLocal) || ((*scan || *scanLocal) && (*proxyLogs || *sensorConfig || *sensorATC1441Defaults)) ||
+		(*proxyLogs && (*sensorConfig || *sensorATC1441Defaults)) || (*sensorConfig && *sensorATC1441Defaults) {
+		fmt.Fprintln(os.Stderr, "--scan, --scan-local, --proxy-logs, --sensor-config, and --sensor-atc1441-defaults are separate modes")
 		os.Exit(2)
 	}
 	if *proxyLogs {
@@ -1161,6 +1779,19 @@ func main() {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
 		if err := scanProxy(ctx, *proxy, *proxyKey, time.Duration(*scanSeconds*float64(time.Second))); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *scanLocal {
+		if *scanSeconds <= 0 || math.IsNaN(*scanSeconds) || math.IsInf(*scanSeconds, 0) || *scanSeconds > float64((24*time.Hour)/time.Second) {
+			fmt.Fprintln(os.Stderr, "--scan-seconds must be positive")
+			os.Exit(2)
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+		if err := scanLocalBLE(ctx, time.Duration(*scanSeconds*float64(time.Second))); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
