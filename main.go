@@ -1699,7 +1699,7 @@ func main() {
 	web := flag.Bool("web", false, "serve the local dashboard and collect into SQLite")
 	proxy := flag.String("proxy", "192.168.1.252", "ESPHome Bluetooth proxy host or host:port (default port 6053)")
 	proxyKey := flag.String("proxy-key", os.Getenv("ESPHOME_API_KEY"), "ESPHome API encryption key (or set ESPHOME_API_KEY)")
-	localBLE := flag.Bool("local-ble", false, "scan with this computer's Bluetooth adapter instead of the proxy")
+	localBLE := flag.Bool("local-ble", false, "use local Bluetooth instead of proxy outside web mode; add local scanning in web mode")
 	scan := flag.Bool("scan", false, "list nearby BLE advertisements received through the proxy, then exit")
 	scanLocal := flag.Bool("scan-local", false, "list nearby BLE advertisements using the local Bluetooth adapter, then exit")
 	scanSeconds := flag.Float64("scan-seconds", 30, "scan duration in seconds for --scan or --scan-local")

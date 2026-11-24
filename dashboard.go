@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -171,7 +172,7 @@ func describeSensorMetric(value *float64, format string, args ...any) string {
 	return fmt.Sprintf(format, append([]any{*value}, args...)...)
 }
 
-func logSensorObservation(observation sensorObservation, alias string) {
+func logSensorObservation(observation sensorObservation, alias, source string) {
 	packet := ""
 	if observation.Counter != nil {
 		packet = fmt.Sprintf(" packet #%d", *observation.Counter)
@@ -180,12 +181,69 @@ func logSensorObservation(observation sensorObservation, alias string) {
 	if label == "" {
 		label = observation.DeviceID
 	}
-	log.Printf("BLE sensor %s [%s, %s] RSSI %d dBm | temperature %s | humidity %s | battery %s | voltage %s%s",
-		observation.DeviceID, label, observation.Format, observation.RSSI,
+	log.Printf("BLE sensor %s %s [%s, %s] RSSI %d dBm | temperature %s | humidity %s | battery %s | voltage %s%s",
+		source, observation.DeviceID, label, observation.Format, observation.RSSI,
 		describeSensorMetric(observation.Temperature, "%.2f°C"),
 		describeSensorMetric(observation.Humidity, "%.1f%%"),
 		describeSensorMetric(observation.Battery, "%.0f%%"),
 		describeSensorMetric(observation.Millivolts, "%.0f mV"), packet)
+}
+
+type sensorObservationSink struct {
+	db     *sql.DB
+	events chan<- event
+	mu     sync.Mutex
+	seen   map[string]uint8
+	values map[string]sensorObservationVersion
+}
+
+type sensorObservationVersion struct {
+	fingerprint string
+	at          time.Time
+}
+
+func observationFingerprint(observation sensorObservation) string {
+	value := func(metric *float64) string {
+		if metric == nil {
+			return "-"
+		}
+		return strconv.FormatFloat(*metric, 'g', -1, 64)
+	}
+	return strings.Join([]string{value(observation.Temperature), value(observation.Humidity), value(observation.Battery), value(observation.Millivolts)}, "/")
+}
+
+func (sink *sensorObservationSink) record(ctx context.Context, observation sensorObservation, source string) {
+	key := observation.DeviceID + "/" + observation.Format
+	sink.mu.Lock()
+	if observation.Counter != nil {
+		previous, exists := sink.seen[key]
+		if exists && previous == *observation.Counter {
+			sink.mu.Unlock()
+			return
+		}
+		sink.seen[key] = *observation.Counter
+	} else {
+		fingerprint := observationFingerprint(observation)
+		previous, exists := sink.values[key]
+		if exists && previous.fingerprint == fingerprint && time.Since(previous.at) <= 2*time.Second {
+			sink.mu.Unlock()
+			return
+		}
+		sink.values[key] = sensorObservationVersion{fingerprint: fingerprint, at: time.Now()}
+	}
+	sink.mu.Unlock()
+	logSensorObservation(observation, getSensorAlias(ctx, sink.db, observation.DeviceID), source)
+	if _, err := saveSensorObservation(ctx, sink.db, observation); err != nil {
+		select {
+		case sink.events <- event{err: fmt.Errorf("saving sensor reading: %w", err)}:
+		default:
+		}
+		return
+	}
+	select {
+	case sink.events <- event{}:
+	default:
+	}
 }
 
 func saveReading(ctx context.Context, db interface {
@@ -610,10 +668,9 @@ func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration
 	var status atomic.Value
 	status.Store("History only")
 	if !viewOnly {
+		status.Store("Connecting to Bluetooth proxy")
 		if localBLE {
-			status.Store("Scanning for sensor")
-		} else {
-			status.Store("Connecting to Bluetooth proxy")
+			status.Store("Connecting to proxy · scanning locally")
 		}
 		go runDashboardCollector(ctx, db, interval, &status, proxyHost, proxyKey, localBLE)
 	}
@@ -639,10 +696,11 @@ func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration
 
 func runDashboardCollector(ctx context.Context, db *sql.DB, _ time.Duration, status *atomic.Value, proxyHost, proxyKey string, localBLE bool) {
 	events := make(chan event, 1)
+	sink := &sensorObservationSink{db: db, events: events, seen: make(map[string]uint8), values: make(map[string]sensorObservationVersion)}
+	go collectProxySensors(ctx, proxyHost, proxyKey, sink)
 	if localBLE {
-		go collectLocalSensors(ctx, db, events)
-	} else {
-		go collectProxySensors(ctx, proxyHost, proxyKey, db, events)
+		log.Print("Requested local BLE scanning")
+		go collectLocalSensors(ctx, sink)
 	}
 	for {
 		select {
@@ -651,21 +709,23 @@ func runDashboardCollector(ctx context.Context, db *sql.DB, _ time.Duration, sta
 		case result := <-events:
 			if result.err != nil {
 				log.Print(result.err)
-				status.Store("Collection stopped · " + result.err.Error())
-				return
+				status.Store("Collector warning · " + result.err.Error())
+				continue
 			}
 			status.Store("Collecting")
 		}
 	}
 }
 
-func collectLocalSensors(ctx context.Context, db *sql.DB, events chan<- event) {
+func collectLocalSensors(ctx context.Context, sink *sensorObservationSink) {
 	adapter := bluetooth.DefaultAdapter
 	if err := adapter.Enable(); err != nil {
-		events <- event{err: fmt.Errorf("Bluetooth: %w", err)}
+		select {
+		case sink.events <- event{err: fmt.Errorf("Bluetooth: %w", err)}:
+		default:
+		}
 		return
 	}
-	seen := make(map[string]uint8)
 	scanDone := make(chan error, 1)
 	go func() {
 		scanDone <- adapter.Scan(func(_ *bluetooth.Adapter, result bluetooth.ScanResult) {
@@ -680,25 +740,7 @@ func collectLocalSensors(ctx context.Context, db *sql.DB, events chan<- event) {
 				adv.ManufacturerData = append(adv.ManufacturerData, scanManufacturerData{ID: fmt.Sprintf("%04x", manufacturer.CompanyID), Data: append([]byte(nil), manufacturer.Data...)})
 			}
 			for _, observation := range decodeSensorObservations(adv) {
-				fingerprint := observation.DeviceID + "/" + observation.Format
-				if observation.Counter != nil {
-					if counter, ok := seen[fingerprint]; ok && counter == *observation.Counter {
-						continue
-					}
-					seen[fingerprint] = *observation.Counter
-				}
-				logSensorObservation(observation, getSensorAlias(ctx, db, observation.DeviceID))
-				if _, err := saveSensorObservation(ctx, db, observation); err != nil {
-					select {
-					case events <- event{err: fmt.Errorf("saving sensor reading: %w", err)}:
-					default:
-					}
-					continue
-				}
-				select {
-				case events <- event{}:
-				default:
-				}
+				sink.record(ctx, observation, "L")
 			}
 		})
 	}()
@@ -711,15 +753,14 @@ func collectLocalSensors(ctx context.Context, db *sql.DB, events chan<- event) {
 			err = errors.New("local Bluetooth scan stopped unexpectedly")
 		}
 		select {
-		case events <- event{err: fmt.Errorf("local Bluetooth scan: %w", err)}:
+		case sink.events <- event{err: fmt.Errorf("local Bluetooth scan: %w", err)}:
 		default:
 		}
 	}
 }
 
-func collectProxySensors(ctx context.Context, host, key string, db *sql.DB, events chan<- event) {
+func collectProxySensors(ctx context.Context, host, key string, sink *sensorObservationSink) {
 	address := proxyAddress(host)
-	seen := make(map[string]uint8)
 	for ctx.Err() == nil {
 		opts := []esphome.Option{esphome.WithClientInfo("TempLogger dashboard sensor collector")}
 		if key != "" {
@@ -753,25 +794,7 @@ func collectProxySensors(ctx context.Context, host, key string, db *sql.DB, even
 			for _, adv := range advertisements {
 				for _, observation := range decodeSensorObservations(adv) {
 					lastValid.Store(time.Now().UnixNano())
-					fingerprint := observation.DeviceID + "/" + observation.Format
-					if observation.Counter != nil {
-						if counter, exists := seen[fingerprint]; exists && counter == *observation.Counter {
-							continue
-						}
-						seen[fingerprint] = *observation.Counter
-					}
-					logSensorObservation(observation, getSensorAlias(ctx, db, observation.DeviceID))
-					if _, err := saveSensorObservation(ctx, db, observation); err != nil {
-						select {
-						case events <- event{err: fmt.Errorf("saving sensor reading: %w", err)}:
-						default:
-						}
-						continue
-					}
-					select {
-					case events <- event{}:
-					default:
-					}
+					sink.record(ctx, observation, "P")
 				}
 			}
 		}
