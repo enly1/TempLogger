@@ -67,9 +67,9 @@ func mustDecodeHex(t *testing.T, value string) []byte {
 func TestParseRawScanAdvertisement(t *testing.T) {
 	servicePayload := mustDecodeHex(t, "a4c138ea80e100e72e5a0bca08")
 	packet := append([]byte{4, 0x09, 'A', 'T', 'C', 16, 0x16, 0x1a, 0x18}, servicePayload...)
-	name, uuids, services, manufacturers := parseRawScanAdvertisement(packet)
-	if name != "ATC" || len(uuids) != 0 || len(services) != 1 || len(manufacturers) != 0 {
-		t.Fatalf("unexpected advertisement parse: name=%q uuids=%v services=%+v manufacturers=%+v", name, uuids, services, manufacturers)
+	uuids, services, manufacturers := parseRawScanAdvertisement(packet)
+	if len(uuids) != 0 || len(services) != 1 || len(manufacturers) != 0 {
+		t.Fatalf("unexpected advertisement parse: uuids=%v services=%+v manufacturers=%+v", uuids, services, manufacturers)
 	}
 	if decoded := decodeBroadcastTemperature(services[0].UUID, services[0].Data); !strings.Contains(decoded, "23.1°C") {
 		t.Fatalf("service data was not decoded: %q", decoded)

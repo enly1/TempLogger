@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync/atomic"
 	"syscall"
@@ -21,6 +22,10 @@ import (
 
 	"github.com/mattn/go-isatty"
 	_ "github.com/mattn/go-sqlite3"
+	esphome "github.com/richard87/esphome-apiclient"
+	"github.com/richard87/esphome-apiclient/pb"
+	"google.golang.org/protobuf/proto"
+	"tinygo.org/x/bluetooth"
 )
 
 //go:embed web/*
@@ -40,6 +45,131 @@ type dashboardReading struct {
 	Millivolts  int     `json:"millivolts"`
 	RSSI        int     `json:"rssi"`
 	Segment     int64   `json:"segment"`
+}
+
+type dashboardSensorReading struct {
+	At          int64    `json:"at"`
+	DeviceID    string   `json:"deviceId"`
+	Format      string   `json:"format"`
+	Temperature *float64 `json:"temperature"`
+	Humidity    *float64 `json:"humidity"`
+	Battery     *float64 `json:"battery"`
+	Millivolts  *float64 `json:"millivolts"`
+	RSSI        int      `json:"rssi"`
+	Segment     int64    `json:"segment"`
+}
+
+type dashboardSensor struct {
+	DeviceID string `json:"deviceId"`
+	Format   string `json:"format"`
+}
+
+func sampleSensorReadings(points []dashboardSensorReading, from, to int64, buckets int64) []dashboardSensorReading {
+	if len(points) < 2 || to <= from {
+		return points
+	}
+	buckets = max(int64(1), buckets)
+	width := max(int64(1), (to-from+1)/buckets)
+	groups := make(map[string][]dashboardSensorReading)
+	var ids []string
+	for _, p := range points {
+		if _, ok := groups[p.DeviceID]; !ok {
+			ids = append(ids, p.DeviceID)
+		}
+		groups[p.DeviceID] = append(groups[p.DeviceID], p)
+	}
+	result := make([]dashboardSensorReading, 0)
+	for _, id := range ids {
+		series := groups[id]
+		keep := map[int]bool{0: true, len(series) - 1: true}
+		if to-from < int64(time.Hour) && len(series) >= 60 {
+			for n := 1; n <= 60; n++ {
+				keep[(n*len(series)+59)/60-1] = true
+			}
+		}
+		for i := 1; i < len(series); i++ {
+			if series[i].Segment != series[i-1].Segment {
+				keep[i-1] = true
+				keep[i] = true
+			}
+		}
+		for start := 0; start < len(series); {
+			bucket := (series[start].At - from) / width
+			end := start + 1
+			for end < len(series) && (series[end].At-from)/width == bucket {
+				end++
+			}
+			keep[start] = true
+			keep[end-1] = true
+			for _, get := range []func(dashboardSensorReading) *float64{func(p dashboardSensorReading) *float64 { return p.Temperature }, func(p dashboardSensorReading) *float64 { return p.Humidity }, func(p dashboardSensorReading) *float64 { return p.Battery }, func(p dashboardSensorReading) *float64 { return p.Millivolts }} {
+				lo, hi := -1, -1
+				for i := start; i < end; i++ {
+					v := get(series[i])
+					if v == nil {
+						continue
+					}
+					if lo < 0 || *v < *get(series[lo]) {
+						lo = i
+					}
+					if hi < 0 || *v > *get(series[hi]) {
+						hi = i
+					}
+				}
+				if lo >= 0 {
+					keep[lo] = true
+					keep[hi] = true
+				}
+			}
+			start = end
+		}
+		indexes := make([]int, 0, len(keep))
+		for i := range keep {
+			indexes = append(indexes, i)
+		}
+		sort.Ints(indexes)
+		for _, i := range indexes {
+			result = append(result, series[i])
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].At == result[j].At {
+			return result[i].DeviceID < result[j].DeviceID
+		}
+		return result[i].At < result[j].At
+	})
+	return result
+}
+
+func saveSensorObservation(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, observation sensorObservation) (sql.Result, error) {
+	return db.ExecContext(ctx, `INSERT OR IGNORE INTO sensor_readings
+		(at, device_id, name, format, temperature, humidity, battery, millivolts, rssi)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM deleted_readings WHERE at = ?)`,
+		observation.Time.UnixNano(), observation.DeviceID, "", observation.Format,
+		observation.Temperature, observation.Humidity, observation.Battery, observation.Millivolts,
+		observation.RSSI, observation.Time.UnixNano())
+}
+
+func describeSensorMetric(value *float64, format string, args ...any) string {
+	if value == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf(format, append([]any{*value}, args...)...)
+}
+
+func logSensorObservation(observation sensorObservation) {
+	packet := ""
+	if observation.Counter != nil {
+		packet = fmt.Sprintf(" packet #%d", *observation.Counter)
+	}
+	log.Printf("BLE sensor %s [%s, %s] RSSI %d dBm | temperature %s | humidity %s | battery %s | voltage %s%s",
+		observation.DeviceID, observation.DeviceID, observation.Format, observation.RSSI,
+		describeSensorMetric(observation.Temperature, "%.2f°C"),
+		describeSensorMetric(observation.Humidity, "%.1f%%"),
+		describeSensorMetric(observation.Battery, "%.0f%%"),
+		describeSensorMetric(observation.Millivolts, "%.0f mV"), packet)
 }
 
 func saveReading(ctx context.Context, db interface {
@@ -89,6 +219,12 @@ func initHistory(ctx context.Context, db *sql.DB, csvPath string) error {
 			battery INTEGER NOT NULL, millivolts INTEGER NOT NULL, rssi INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS deleted_readings (at INTEGER PRIMARY KEY);
+		CREATE TABLE IF NOT EXISTS sensor_readings (
+			at INTEGER NOT NULL, device_id TEXT NOT NULL, name TEXT NOT NULL, format TEXT NOT NULL,
+			temperature REAL, humidity REAL, battery REAL, millivolts REAL, rssi INTEGER NOT NULL,
+			PRIMARY KEY(at, device_id, format)
+		);
+		CREATE INDEX IF NOT EXISTS sensor_readings_at ON sensor_readings(at);
 	`); err != nil {
 		return err
 	}
@@ -113,6 +249,14 @@ func initHistory(ctx context.Context, db *sql.DB, csvPath string) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return err
+	}
+	// Bring the existing single-sensor history into the normalized chart store
+	// so it remains visible alongside readings collected after the upgrade.
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO sensor_readings
+		(at, device_id, name, format, temperature, humidity, battery, millivolts, rssi)
+		SELECT r.at, ?, '', 'ATC', r.temperature, r.humidity, r.battery, r.millivolts, r.rssi
+		FROM readings r WHERE NOT EXISTS (SELECT 1 FROM deleted_readings d WHERE d.at = r.at)`, "A4C138EA80E1"); err != nil {
+		return fmt.Errorf("migrate existing chart readings: %w", err)
 	}
 	if imported > 0 {
 		log.Printf("Imported %d readings from %s", imported, csvPath)
@@ -191,7 +335,7 @@ func deleteHistoryBetween(ctx context.Context, db *sql.DB, from, to int64) (int6
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO deleted_readings (at)
-		SELECT at FROM readings WHERE at BETWEEN ? AND ?`, from, to); err != nil {
+		SELECT at FROM readings WHERE at BETWEEN ? AND ? UNION SELECT at FROM sensor_readings WHERE at BETWEEN ? AND ?`, from, to, from, to); err != nil {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, "DELETE FROM readings WHERE at BETWEEN ? AND ?", from, to)
@@ -202,6 +346,15 @@ func deleteHistoryBetween(ctx context.Context, db *sql.DB, from, to int64) (int6
 	if err != nil {
 		return 0, err
 	}
+	sensorResult, err := tx.ExecContext(ctx, "DELETE FROM sensor_readings WHERE at BETWEEN ? AND ?", from, to)
+	if err != nil {
+		return 0, err
+	}
+	sensorDeleted, err := sensorResult.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	deleted += sensorDeleted
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -218,20 +371,30 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 		_ = json.NewEncoder(w).Encode(data)
 	}
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		var p dashboardReading
-		var latest *dashboardReading
-		err := db.QueryRowContext(r.Context(), "SELECT "+readingColumns+" FROM readings ORDER BY at DESC LIMIT 1").
-			Scan(&p.At, &p.Temperature, &p.Humidity, &p.Battery, &p.Millivolts, &p.RSSI)
+		var latest any
+		var sensor dashboardSensorReading
+		err := db.QueryRowContext(r.Context(), `SELECT at, device_id, format, temperature, humidity, battery, millivolts, rssi
+			FROM sensor_readings ORDER BY at DESC LIMIT 1`).
+			Scan(&sensor.At, &sensor.DeviceID, &sensor.Format, &sensor.Temperature, &sensor.Humidity, &sensor.Battery, &sensor.Millivolts, &sensor.RSSI)
 		if err == nil {
-			p.At /= int64(time.Millisecond)
-			latest = &p
-		} else if !errors.Is(err, sql.ErrNoRows) {
+			sensor.At /= int64(time.Millisecond)
+			latest = sensor
+		} else if errors.Is(err, sql.ErrNoRows) {
+			var p dashboardReading
+			err = db.QueryRowContext(r.Context(), "SELECT "+readingColumns+" FROM readings ORDER BY at DESC LIMIT 1").
+				Scan(&p.At, &p.Temperature, &p.Humidity, &p.Battery, &p.Millivolts, &p.RSSI)
+			if err == nil {
+				p.At /= int64(time.Millisecond)
+				latest = p
+			}
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			log.Print(err)
 			http.Error(w, "Could not read history", http.StatusInternalServerError)
 			return
 		}
 		var first sql.NullInt64
-		if err := db.QueryRowContext(r.Context(), "SELECT MIN(at) FROM readings").Scan(&first); err != nil {
+		if err := db.QueryRowContext(r.Context(), "SELECT MIN(at) FROM (SELECT at FROM readings UNION ALL SELECT at FROM sensor_readings)").Scan(&first); err != nil {
 			log.Print(err)
 			http.Error(w, "Could not read history", http.StatusInternalServerError)
 			return
@@ -262,6 +425,72 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 			return
 		}
 		sendJSON(w, points)
+	})
+	mux.HandleFunc("GET /api/sensors", func(w http.ResponseWriter, r *http.Request) {
+		rows, err := db.QueryContext(r.Context(), `SELECT device_id,
+			GROUP_CONCAT(DISTINCT format) FROM sensor_readings
+			GROUP BY device_id ORDER BY device_id`)
+		if err != nil {
+			http.Error(w, "Could not read sensors", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+		sensors := make([]dashboardSensor, 0)
+		for rows.Next() {
+			var sensor dashboardSensor
+			if err := rows.Scan(&sensor.DeviceID, &sensor.Format); err != nil {
+				http.Error(w, "Could not read sensors", http.StatusInternalServerError)
+				return
+			}
+			sensors = append(sensors, sensor)
+		}
+		if err := rows.Err(); err != nil {
+			http.Error(w, "Could not read sensors", http.StatusInternalServerError)
+			return
+		}
+		sendJSON(w, sensors)
+	})
+	mux.HandleFunc("GET /api/sensor-readings", func(w http.ResponseWriter, r *http.Request) {
+		from, fromErr := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
+		to, toErr := strconv.ParseInt(r.URL.Query().Get("to"), 10, 64)
+		if fromErr != nil || toErr != nil || from < 0 || to <= from || to > 9223372036853 {
+			http.Error(w, "Expected a valid from/to range in milliseconds", http.StatusBadRequest)
+			return
+		}
+		rows, err := db.QueryContext(r.Context(), `WITH ordered AS (
+			SELECT *, at - LAG(at) OVER (PARTITION BY device_id ORDER BY at) AS elapsed
+			FROM sensor_readings WHERE at BETWEEN ? AND ?
+		), segmented AS (
+			SELECT *, SUM(CASE WHEN elapsed > ? THEN 1 ELSE 0 END) OVER (PARTITION BY device_id ORDER BY at) AS segment FROM ordered
+		) SELECT at, device_id, format, temperature, humidity, battery, millivolts, rssi, segment
+		FROM segmented ORDER BY at`, from*int64(time.Millisecond), (to+1)*int64(time.Millisecond)-1, max(90*time.Second, interval*3).Nanoseconds())
+		if err != nil {
+			http.Error(w, "Could not read sensor history", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+		readings := make([]dashboardSensorReading, 0)
+		for rows.Next() {
+			var p dashboardSensorReading
+			if err := rows.Scan(&p.At, &p.DeviceID, &p.Format, &p.Temperature, &p.Humidity, &p.Battery, &p.Millivolts, &p.RSSI, &p.Segment); err != nil {
+				http.Error(w, "Could not read sensor history", http.StatusInternalServerError)
+				return
+			}
+			p.At /= int64(time.Millisecond)
+			readings = append(readings, p)
+		}
+		if err := rows.Err(); err != nil {
+			http.Error(w, "Could not read sensor history", http.StatusInternalServerError)
+			return
+		}
+		buckets := int64(750)
+		if raw := r.URL.Query().Get("buckets"); raw != "" {
+			if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 && n <= 5000 {
+				buckets = n
+			}
+		}
+		readings = sampleSensorReadings(readings, from, to, buckets)
+		sendJSON(w, readings)
 	})
 	mux.HandleFunc("DELETE /api/readings", func(w http.ResponseWriter, r *http.Request) {
 		from, fromErr := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
@@ -326,23 +555,12 @@ func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration
 	return nil
 }
 
-func runDashboardCollector(ctx context.Context, db *sql.DB, interval time.Duration, status *atomic.Value, proxyHost, proxyKey string, localBLE bool) {
+func runDashboardCollector(ctx context.Context, db *sql.DB, _ time.Duration, status *atomic.Value, proxyHost, proxyKey string, localBLE bool) {
 	events := make(chan event, 1)
-	lastSaved := time.Time{}
-	save := func(r reading) error {
-		if interval > 0 && !lastSaved.IsZero() && r.Time.Sub(lastSaved) < interval {
-			return nil
-		}
-		_, err := saveReading(ctx, db, r)
-		if err == nil {
-			lastSaved = r.Time
-		}
-		return err
-	}
 	if localBLE {
-		go collectLocal(ctx, 0, save, events, false)
+		go collectLocalSensors(ctx, db, events)
 	} else {
-		go collectProxy(ctx, proxyHost, proxyKey, 0, save, events, false, true)
+		go collectProxySensors(ctx, proxyHost, proxyKey, db, events)
 	}
 	for {
 		select {
@@ -355,6 +573,163 @@ func runDashboardCollector(ctx context.Context, db *sql.DB, interval time.Durati
 				return
 			}
 			status.Store("Collecting")
+		}
+	}
+}
+
+func collectLocalSensors(ctx context.Context, db *sql.DB, events chan<- event) {
+	adapter := bluetooth.DefaultAdapter
+	if err := adapter.Enable(); err != nil {
+		events <- event{err: fmt.Errorf("Bluetooth: %w", err)}
+		return
+	}
+	seen := make(map[string]uint8)
+	scanDone := make(chan error, 1)
+	go func() {
+		scanDone <- adapter.Scan(func(_ *bluetooth.Adapter, result bluetooth.ScanResult) {
+			adv := scanAdvertisement{Address: result.Address.String(), RSSI: int(result.RSSI), Raw: append([]byte(nil), result.Bytes()...)}
+			for _, uuid := range result.ServiceUUIDs() {
+				adv.ServiceUUIDs = append(adv.ServiceUUIDs, uuid.String())
+			}
+			for _, service := range result.ServiceData() {
+				adv.ServiceData = append(adv.ServiceData, scanServiceData{UUID: service.UUID.String(), Data: append([]byte(nil), service.Data...)})
+			}
+			for _, manufacturer := range result.ManufacturerData() {
+				adv.ManufacturerData = append(adv.ManufacturerData, scanManufacturerData{ID: fmt.Sprintf("%04x", manufacturer.CompanyID), Data: append([]byte(nil), manufacturer.Data...)})
+			}
+			for _, observation := range decodeSensorObservations(adv) {
+				fingerprint := observation.DeviceID + "/" + observation.Format
+				if observation.Counter != nil {
+					if counter, ok := seen[fingerprint]; ok && counter == *observation.Counter {
+						continue
+					}
+					seen[fingerprint] = *observation.Counter
+				}
+				logSensorObservation(observation)
+				if _, err := saveSensorObservation(ctx, db, observation); err != nil {
+					select {
+					case events <- event{err: fmt.Errorf("saving sensor reading: %w", err)}:
+					default:
+					}
+					continue
+				}
+				select {
+				case events <- event{}:
+				default:
+				}
+			}
+		})
+	}()
+	select {
+	case <-ctx.Done():
+		_ = adapter.StopScan()
+		<-scanDone
+	case err := <-scanDone:
+		if err == nil {
+			err = errors.New("local Bluetooth scan stopped unexpectedly")
+		}
+		select {
+		case events <- event{err: fmt.Errorf("local Bluetooth scan: %w", err)}:
+		default:
+		}
+	}
+}
+
+func collectProxySensors(ctx context.Context, host, key string, db *sql.DB, events chan<- event) {
+	address := proxyAddress(host)
+	seen := make(map[string]uint8)
+	for ctx.Err() == nil {
+		opts := []esphome.Option{esphome.WithClientInfo("TempLogger dashboard sensor collector")}
+		if key != "" {
+			opts = append(opts, esphome.WithEncryptionKey(key))
+		}
+		client, err := esphome.DialWithContext(ctx, address, 5*time.Second, opts...)
+		if err != nil {
+			if !waitProxyReconnect(ctx, address) {
+				return
+			}
+			continue
+		}
+		requestPassiveProxyScan(client)
+		var lastValid atomic.Int64
+		lastValid.Store(time.Now().UnixNano())
+		handler := func(msg proto.Message) {
+			var advertisements []scanAdvertisement
+			switch batch := msg.(type) {
+			case *pb.BluetoothLERawAdvertisementsResponse:
+				for _, adv := range batch.Advertisements {
+					uuids, services, manufacturers := parseRawScanAdvertisement(adv.Data)
+					advertisements = append(advertisements, scanAdvertisement{Address: fmt.Sprintf("%012X", adv.Address), RSSI: int(adv.Rssi), Raw: adv.Data, ServiceUUIDs: uuids, ServiceData: services, ManufacturerData: manufacturers})
+				}
+			case *pb.BluetoothLEAdvertisementResponse:
+				adv := scanAdvertisement{Address: fmt.Sprintf("%012X", batch.Address), RSSI: int(batch.Rssi), ServiceUUIDs: batch.ServiceUuids}
+				for _, service := range batch.ServiceData {
+					adv.ServiceData = append(adv.ServiceData, scanServiceData{UUID: service.Uuid, Data: service.Data})
+				}
+				advertisements = append(advertisements, adv)
+			}
+			for _, adv := range advertisements {
+				for _, observation := range decodeSensorObservations(adv) {
+					lastValid.Store(time.Now().UnixNano())
+					fingerprint := observation.DeviceID + "/" + observation.Format
+					if observation.Counter != nil {
+						if counter, exists := seen[fingerprint]; exists && counter == *observation.Counter {
+							continue
+						}
+						seen[fingerprint] = *observation.Counter
+					}
+					logSensorObservation(observation)
+					if _, err := saveSensorObservation(ctx, db, observation); err != nil {
+						select {
+						case events <- event{err: fmt.Errorf("saving sensor reading: %w", err)}:
+						default:
+						}
+						continue
+					}
+					select {
+					case events <- event{}:
+					default:
+					}
+				}
+			}
+		}
+		unsubscribe, err := subscribeProxyAdvertisements(client, handler)
+		if err != nil {
+			_ = client.Close()
+			if !waitProxyReconnect(ctx, address) {
+				return
+			}
+			continue
+		}
+		idleTicker := time.NewTicker(30 * time.Second)
+		connected := true
+		for connected {
+			select {
+			case <-ctx.Done():
+				idleTicker.Stop()
+				unsubscribe()
+				_ = client.Close()
+				return
+			case <-client.Done():
+				connected = false
+			case <-idleTicker.C:
+				if time.Since(time.Unix(0, lastValid.Load())) >= 30*time.Second {
+					log.Printf("No valid proxy sensor packet received for 30s; refreshing dashboard BLE subscription")
+					unsubscribe()
+					lastValid.Store(time.Now().UnixNano())
+					unsubscribe, err = subscribeProxyAdvertisements(client, handler)
+					if err != nil {
+						log.Printf("Refreshing dashboard BLE subscription via %s failed: %v", address, err)
+						connected = false
+					}
+				}
+			}
+		}
+		idleTicker.Stop()
+		unsubscribe()
+		_ = client.Close()
+		if !waitProxyReconnect(ctx, address) {
+			return
 		}
 	}
 }

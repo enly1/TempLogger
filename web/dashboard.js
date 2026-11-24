@@ -4,13 +4,23 @@ const get = id => document.getElementById(id);
 const charts = [
   {canvas: get('temp-chart'), field: 'temperature', color: '#72d7a9'},
   {canvas: get('humidity-chart'), field: 'humidity', color: '#8dbcf0'},
-  {canvas: get('battery-chart'), field: 'battery', color: '#e6bc72'}
+  {canvas: get('battery-chart'), field: 'battery', color: '#e6bc72'},
+  {canvas: get('voltage-chart'), field: 'millivolts', color: '#bb9bed'},
+  {canvas: get('rssi-chart'), field: 'rssi', color: '#e98da8'}
 ];
+const sensorPalette = ['#72d7a9', '#8dbcf0', '#e6bc72', '#e98da8', '#bb9bed', '#8ed6d1', '#e5a46f', '#c1d979'];
+const sensorColors = new Map();
+const sensorColor = deviceId => {
+  if (!sensorColors.has(deviceId)) sensorColors.set(deviceId, sensorPalette[sensorColors.size % sensorPalette.length]);
+  return sensorColors.get(deviceId);
+};
 const clock = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-digit', second: '2-digit'});
 const dateTime = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 const date = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric'});
 let span = 86400000, range = span, pinnedEnd = null;
-let points = [], displayed, cursor = null, request = 0;
+let points = [], sensorPoints = [], sensors = [], displayed, cursor = null, request = 0;
+const selectedSensors = new Set();
+const knownSensors = new Set();
 let axisLimits = {};
 let chartMode = 'smooth';
 let mockMode = false, drag = null;
@@ -56,6 +66,37 @@ function mockReadings(from, to, buckets) {
   return [...byTime.values()].sort((a, b) => a.at - b.at);
 }
 
+function sampleSensorRows(rows, from, to, buckets) {
+  const width = Math.max(1, (to - from) / Math.max(1, buckets));
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!grouped.has(row.deviceId)) grouped.set(row.deviceId, []);
+    grouped.get(row.deviceId).push(row);
+  }
+  const result = [];
+  for (const series of grouped.values()) {
+    const keep = new Set([0, series.length - 1]);
+    const byBucket = new Map();
+    for (let i = 0; i < series.length; i++) {
+      if (i && series[i].segment !== series[i - 1].segment) { keep.add(i - 1); keep.add(i); }
+      const bucket = Math.floor((series[i].at - from) / width);
+      if (!byBucket.has(bucket)) byBucket.set(bucket, []);
+      byBucket.get(bucket).push(i);
+    }
+    for (const indexes of byBucket.values()) {
+      keep.add(indexes[0]); keep.add(indexes[indexes.length - 1]);
+      for (const field of ['temperature', 'humidity', 'battery', 'millivolts']) {
+        const valid = indexes.filter(i => series[i][field] != null);
+        if (!valid.length) continue;
+        keep.add(valid.reduce((best, i) => series[i][field] < series[best][field] ? i : best));
+        keep.add(valid.reduce((best, i) => series[i][field] > series[best][field] ? i : best));
+      }
+    }
+    for (const i of [...keep].sort((a, b) => a - b)) result.push(series[i]);
+  }
+  return result.sort((a, b) => a.at - b.at || a.deviceId.localeCompare(b.deviceId));
+}
+
 async function readJSON(url) {
   const response = await fetch(url);
   if (!response.ok) throw new Error('Dashboard data unavailable');
@@ -81,18 +122,36 @@ async function refresh() {
     if (displayed?.key !== key) {
       if (mockMode) {
         points = mockReadings(from, to, buckets);
+        sensorPoints = [];
       } else {
-        const rows = await readJSON('/api/readings?from=' + from + '&to=' + to + '&buckets=' + buckets);
+        const [rows, allSensors, sensorRows] = await Promise.all([
+          readJSON('/api/readings?from=' + from + '&to=' + to + '&buckets=' + buckets),
+          readJSON('/api/sensors'),
+          readJSON('/api/sensor-readings?from=' + from + '&to=' + to + '&buckets=' + buckets)
+        ]);
         if (version !== request) return;
         points = rows;
+        sensorPoints = sampleSensorRows(sensorRows, from, to, buckets);
+        sensors = allSensors;
+        for (const sensor of sensors) {
+          if (!knownSensors.has(sensor.deviceId)) selectedSensors.add(sensor.deviceId);
+          knownSensors.add(sensor.deviceId);
+        }
+        for (const id of [...knownSensors]) {
+          if (!sensors.some(sensor => sensor.deviceId === id)) {
+            knownSensors.delete(id);
+            selectedSensors.delete(id);
+          }
+        }
+        renderSensorToggles();
       }
       displayed = {from, to, key};
     }
-    const latest = mockMode ? points[points.length - 1] : next.latest;
+    const latest = mockMode ? points[points.length - 1] : sensorPoints[sensorPoints.length - 1] ?? next.latest;
     get('status').textContent = mockMode ? 'Mock data · local preview' : next.state;
-    get('temperature').textContent = latest ? latest.temperature.toFixed(1) + ' °C' : '—';
-    get('humidity').textContent = latest ? latest.humidity + '%' : '—';
-    get('battery').textContent = latest ? latest.battery + '%' : '—';
+    get('temperature').textContent = latest?.temperature != null ? latest.temperature.toFixed(1) + ' °C' : '—';
+    get('humidity').textContent = latest?.humidity != null ? latest.humidity + '%' : '—';
+    get('battery').textContent = latest?.battery != null ? latest.battery + '%' : '—';
     get('battery-voltage').textContent = latest?.millivolts > 0
       ? (latest.millivolts / 1000).toFixed(3) + ' V · sensor estimate'
       : 'Sensor estimate';
@@ -110,8 +169,29 @@ async function refresh() {
 function draw() {
   for (const chart of charts) render(chart);
   get('detail').textContent = cursor
-    ? clock.format(cursor.at) + ' · ' + cursor.temperature.toFixed(1) + ' °C · ' + cursor.humidity + '% RH · ' + cursor.battery + '% battery'
+    ? [clock.format(cursor.at), cursor.deviceId || '', cursor.temperature == null ? '' : cursor.temperature.toFixed(1) + ' °C', cursor.humidity == null ? '' : cursor.humidity + '% RH', cursor.battery == null ? '' : cursor.battery + '% battery', cursor.millivolts == null ? '' : cursor.millivolts + ' mV', cursor.rssi == null ? '' : cursor.rssi + ' dBm'].filter(Boolean).join(' · ')
     : '';
+}
+
+function renderSensorToggles() {
+  const list = get('sensor-list');
+  list.hidden = mockMode || sensors.length === 0;
+  list.querySelectorAll('label').forEach(label => label.remove());
+  for (const sensor of sensors) {
+    const label = document.createElement('label');
+    label.style.color = sensorColor(sensor.deviceId);
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selectedSensors.has(sensor.deviceId);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) selectedSensors.add(sensor.deviceId);
+      else selectedSensors.delete(sensor.deviceId);
+      axisLimits = {};
+      draw();
+    });
+    label.append(checkbox, document.createTextNode(`${sensor.deviceId} · ${sensor.format}`));
+    list.append(label);
+  }
 }
 
 function render({canvas, field, color}) {
@@ -126,7 +206,8 @@ function render({canvas, field, color}) {
   const duration = displayed.to - displayed.from;
   const x = at => left + (at - displayed.from) * (right - left) / duration;
   ctx.font = '11px system-ui';
-  const visible = points.filter(p => p.at >= displayed.from && p.at <= displayed.to);
+  const source = sensorPoints.length ? sensorPoints.filter(p => selectedSensors.has(p.deviceId)) : points;
+  const visible = source.filter(p => p[field] != null && p.at >= displayed.from && p.at <= displayed.to);
   if (!visible.length) {
     ctx.fillStyle = '#a1b4ac';
     ctx.textAlign = 'center';
@@ -155,17 +236,18 @@ function render({canvas, field, color}) {
     ctx.textAlign = i === 0 ? 'left' : i === ticks - 1 ? 'right' : 'center';
     ctx.fillText((duration > 172800000 ? date : clock).format(at), x(at), height - 6);
   }
-  ctx.strokeStyle = color;
-  ctx.fillStyle = color;
-  ctx.lineWidth = 1.6;
-  ctx.beginPath();
-  const segments = [];
-  for (const point of visible) {
-    const segment = segments[segments.length - 1];
-    if (!segment || point.segment !== segment[0].segment) segments.push([point]);
-    else segment.push(point);
-  }
-  for (const segment of segments) {
+  const groups = source === points ? new Map([['legacy', visible]]) : new Map(sensors.filter(s => selectedSensors.has(s.deviceId)).map(s => [s.deviceId, visible.filter(p => p.deviceId === s.deviceId)]));
+  for (const [deviceId, series] of groups) {
+    const seriesColor = source === points ? color : sensorColor(deviceId);
+    if (!series.length) continue;
+    ctx.strokeStyle = seriesColor; ctx.fillStyle = seriesColor; ctx.lineWidth = 1.6; ctx.beginPath();
+    const segments = [];
+    for (const point of series) {
+      const segment = segments[segments.length - 1];
+      if (!segment || point.segment !== segment[0].segment) segments.push([point]);
+      else segment.push(point);
+    }
+    for (const segment of segments) {
     const coords = segment.map(point => [x(point.at), y(point[field])]);
     ctx.moveTo(coords[0][0], coords[0][1]);
     if (chartMode === 'raw' || coords.length < 3) {
@@ -183,8 +265,9 @@ function render({canvas, field, color}) {
         p2[0], p2[1]
       );
     }
+    }
+    ctx.stroke();
   }
-  ctx.stroke();
   if (chartMode === 'raw' && visible.length < 250) {
     for (const point of visible) {
       ctx.beginPath(); ctx.arc(x(point.at), y(point[field]), 2, 0, Math.PI * 2); ctx.fill();
@@ -307,7 +390,8 @@ for (const {canvas} of charts) {
       return;
     }
     const at = timeAt(event.clientX);
-    cursor = points.reduce((best, p) =>
+    const hoverPoints = sensorPoints.length ? sensorPoints.filter(p => selectedSensors.has(p.deviceId)) : points;
+    cursor = hoverPoints.reduce((best, p) =>
       !best || Math.abs(p.at - at) < Math.abs(best.at - at) ? p : best, null);
     if (cursor && Math.abs(cursor.at - at) > (displayed.to - displayed.from) * 0.08) cursor = null;
     draw();
@@ -342,6 +426,7 @@ for (const {canvas} of charts) {
 get('mock-mode').onclick = () => {
   mockMode = !mockMode;
   get('mock-mode').setAttribute('aria-pressed', mockMode);
+  renderSensorToggles();
   displayed = null;
   axisLimits = {};
   refresh();

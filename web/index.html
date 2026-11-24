@@ -43,9 +43,12 @@
         </div>
       </div>
       <p class="chart-help">Left-drag to zoom · right-drag to select readings for deletion</p>
+      <fieldset id="sensor-list" class="sensor-list" hidden><legend>Visible sensors</legend></fieldset>
       <figure><figcaption>Temperature <small>°C</small></figcaption><canvas id="temp-chart" role="img" aria-label="Temperature over time; drag to zoom"></canvas></figure>
       <figure><figcaption>Humidity <small>%</small></figcaption><canvas id="humidity-chart" role="img" aria-label="Humidity over time; drag to zoom"></canvas></figure>
       <figure><figcaption>Battery <small>%</small></figcaption><canvas id="battery-chart" role="img" aria-label="Battery percentage over time; drag to zoom"></canvas></figure>
+      <figure><figcaption>Battery voltage <small>mV</small></figcaption><canvas id="voltage-chart" role="img" aria-label="Battery voltage over time; drag to zoom"></canvas></figure>
+      <figure><figcaption>Signal strength <small>dBm</small></figcaption><canvas id="rssi-chart" role="img" aria-label="Signal strength over time; drag to zoom"></canvas></figure>
       <footer><span id="window"></span><output id="detail"></output></footer>
     </section>
   </main>

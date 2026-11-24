@@ -26,6 +26,8 @@ figure { margin: 20px 0 7px; }
 figcaption { margin-left: 8px; font-weight: 600; }
 figcaption small { margin-left: 4px; }
 .chart-help { margin: 12px 8px -8px; color: #a1b4ac; font-size: 12px; }
+.sensor-list { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 14px 4px 0; padding: 8px 12px; border: 1px solid #304039; border-radius: 8px; }
+.sensor-list label { display: inline-flex; align-items: center; gap: 6px; color: #c5d3cc; font-size: 13px; cursor: pointer; }
 canvas { width: 100%; height: 185px; display: block; cursor: crosshair; touch-action: none; }
 footer { font-size: 12px; min-height: 32px; border-top: 1px solid #283832; padding: 7px 8px 0; }
 #detail { color: #e9eeeb; min-height: 1.2em; }
