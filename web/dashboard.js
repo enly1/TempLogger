@@ -18,7 +18,7 @@ const clock = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-di
 const dateTime = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 const date = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric'});
 let span = 86400000, range = span, pinnedEnd = null;
-let points = [], sensorPoints = [], sensors = [], displayed, cursor = null, request = 0;
+let points = [], sensorPoints = [], sensors = [], displayed, cursor = null, hoveredCanvas = null, request = 0;
 const selectedSensors = new Set();
 const knownSensors = new Set();
 let axisLimits = {};
@@ -173,6 +173,80 @@ function draw() {
     : '';
 }
 
+function chartPoints() {
+  return sensorPoints.length ? sensorPoints.filter(p => selectedSensors.has(p.deviceId)) : points;
+}
+
+function visibleChartPoints(field) {
+  return chartPoints().filter(p => p[field] != null && p.at >= displayed.from && p.at <= displayed.to);
+}
+
+function chartBounds(field, visible) {
+  let [min, max] = axisLimits[field] ?? [Infinity, -Infinity];
+  for (const point of visible) {
+    if (point[field] < min) min = Math.floor(point[field]) - 1;
+    if (point[field] > max) max = Math.ceil(point[field]) + 1;
+  }
+  axisLimits[field] = [min, max];
+  return [min, max];
+}
+
+function nearestPointOnChart(canvas, field, clientX, clientY) {
+  if (!displayed) return null;
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  const left = 48, right = width - 14, top = 12, bottom = height - 24;
+  const rect = canvas.getBoundingClientRect();
+  const pointerX = clientX - rect.left, pointerY = clientY - rect.top;
+  if (pointerX < left || pointerX > right || pointerY < top || pointerY > bottom) return null;
+  const visible = visibleChartPoints(field);
+  if (!visible.length) return null;
+  const [min, max] = chartBounds(field, visible);
+  const duration = displayed.to - displayed.from;
+  const x = at => left + (at - displayed.from) * (right - left) / duration;
+  const y = value => bottom - (value - min) * (bottom - top) / (max - min);
+  let nearest = null, nearestDistance = Infinity;
+  for (const point of visible) {
+    const dx = x(point.at) - pointerX, dy = y(point[field]) - pointerY;
+    const distance = Math.hypot(dx, dy);
+    if (distance < nearestDistance) { nearest = point; nearestDistance = distance; }
+  }
+  return nearestDistance <= 24 ? nearest : null;
+}
+
+function drawHoverTooltip(ctx, canvas, point, px, py) {
+  const lines = [];
+  const identity = [point.deviceId || 'Mock sensor', point.format].filter(Boolean).join(' · ');
+  lines.push(identity, dateTime.format(point.at));
+  const measurements = [];
+  if (point.temperature != null) measurements.push(point.temperature.toFixed(2) + ' °C');
+  if (point.humidity != null) measurements.push(point.humidity.toFixed(1) + '% RH');
+  if (point.battery != null) measurements.push(point.battery.toFixed(0) + '% battery');
+  if (point.millivolts != null) measurements.push(point.millivolts.toFixed(0) + ' mV');
+  if (point.rssi != null) measurements.push(point.rssi + ' dBm');
+  for (let i = 0; i < measurements.length; i += 2) lines.push(measurements.slice(i, i + 2).join(' · '));
+
+  ctx.save();
+  ctx.font = '12px system-ui';
+  const boxWidth = Math.min(canvas.clientWidth - 16, Math.max(190, ...lines.map(line => ctx.measureText(line).width + 20)));
+  const lineHeight = 17, boxHeight = lines.length * lineHeight + 14;
+  const x = Math.max(8, Math.min(canvas.clientWidth - boxWidth - 8, px + 12 + boxWidth <= canvas.clientWidth ? px + 12 : px - boxWidth - 12));
+  const y = Math.max(8, Math.min(canvas.clientHeight - boxHeight - 8, py - boxHeight - 12));
+  ctx.fillStyle = 'rgba(17, 23, 21, 0.96)';
+  ctx.strokeStyle = point.deviceId ? sensorColor(point.deviceId) : '#d5e1db';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(x, y, boxWidth, boxHeight, 7);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#f0f5f2';
+  ctx.textAlign = 'left';
+  for (let i = 0; i < lines.length; i++) {
+    ctx.font = i === 0 ? '600 12px system-ui' : '12px system-ui';
+    ctx.fillText(lines[i], x + 10, y + 17 + i * lineHeight, boxWidth - 20);
+  }
+  ctx.restore();
+}
+
 function renderSensorToggles() {
   const list = get('sensor-list');
   list.hidden = mockMode || sensors.length === 0;
@@ -206,20 +280,15 @@ function render({canvas, field, color}) {
   const duration = displayed.to - displayed.from;
   const x = at => left + (at - displayed.from) * (right - left) / duration;
   ctx.font = '11px system-ui';
-  const source = sensorPoints.length ? sensorPoints.filter(p => selectedSensors.has(p.deviceId)) : points;
-  const visible = source.filter(p => p[field] != null && p.at >= displayed.from && p.at <= displayed.to);
+  const source = chartPoints();
+  const visible = visibleChartPoints(field);
   if (!visible.length) {
     ctx.fillStyle = '#a1b4ac';
     ctx.textAlign = 'center';
     ctx.fillText('No readings in this window', width / 2, height / 2);
     return;
   }
-  let [min, max] = axisLimits[field] ?? [Infinity, -Infinity];
-  for (const point of visible) {
-    if (point[field] < min) min = Math.floor(point[field]) - 1;
-    if (point[field] > max) max = Math.ceil(point[field]) + 1;
-  }
-  axisLimits[field] = [min, max];
+  const [min, max] = chartBounds(field, visible);
   const y = value => bottom - (value - min) * (bottom - top) / (max - min);
   for (let i = 0; i <= 4; i++) {
     const value = min + (max - min) * i / 4;
@@ -276,7 +345,10 @@ function render({canvas, field, color}) {
   if (cursor && cursor.at >= displayed.from && cursor.at <= displayed.to) {
     ctx.strokeStyle = '#72877d';
     ctx.beginPath(); ctx.moveTo(x(cursor.at), top); ctx.lineTo(x(cursor.at), bottom); ctx.stroke();
-    ctx.beginPath(); ctx.arc(x(cursor.at), y(cursor[field]), 4, 0, Math.PI * 2); ctx.fill();
+    if (cursor[field] != null) {
+      ctx.beginPath(); ctx.arc(x(cursor.at), y(cursor[field]), 4, 0, Math.PI * 2); ctx.fill();
+    }
+    if (hoveredCanvas === canvas && cursor[field] != null) drawHoverTooltip(ctx, canvas, cursor, x(cursor.at), y(cursor[field]));
   }
   if (drag && drag.canvas === canvas) {
     const startX = Math.max(left, Math.min(right, drag.startX));
@@ -377,6 +449,7 @@ for (const {canvas} of charts) {
     if (operation === 'delete') event.preventDefault();
     drag = {canvas, operation, startX: x, currentX: x, startAt: timeAt(event.clientX), currentAt: timeAt(event.clientX)};
     cursor = null;
+    hoveredCanvas = null;
     canvas.setPointerCapture(event.pointerId);
     draw();
   });
@@ -389,11 +462,8 @@ for (const {canvas} of charts) {
       draw();
       return;
     }
-    const at = timeAt(event.clientX);
-    const hoverPoints = sensorPoints.length ? sensorPoints.filter(p => selectedSensors.has(p.deviceId)) : points;
-    cursor = hoverPoints.reduce((best, p) =>
-      !best || Math.abs(p.at - at) < Math.abs(best.at - at) ? p : best, null);
-    if (cursor && Math.abs(cursor.at - at) > (displayed.to - displayed.from) * 0.08) cursor = null;
+    hoveredCanvas = canvas;
+    cursor = nearestPointOnChart(canvas, charts.find(chart => chart.canvas === canvas).field, event.clientX, event.clientY);
     draw();
   });
   canvas.addEventListener('pointerup', event => {
@@ -416,11 +486,12 @@ for (const {canvas} of charts) {
       }
     }
     cursor = null;
+    hoveredCanvas = null;
     draw();
   });
   canvas.addEventListener('pointercancel', () => { drag = null; draw(); });
   canvas.addEventListener('contextmenu', event => event.preventDefault());
-  canvas.addEventListener('pointerleave', () => { if (!drag) { cursor = null; draw(); } });
+  canvas.addEventListener('pointerleave', () => { if (!drag) { cursor = null; hoveredCanvas = null; draw(); } });
   new ResizeObserver(refresh).observe(canvas);
 }
 get('mock-mode').onclick = () => {
