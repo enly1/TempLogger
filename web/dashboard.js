@@ -14,11 +14,13 @@ const sensorColor = deviceId => {
   if (!sensorColors.has(deviceId)) sensorColors.set(deviceId, sensorPalette[sensorColors.size % sensorPalette.length]);
   return sensorColors.get(deviceId);
 };
+const sensorAlias = deviceId => sensors.find(sensor => sensor.deviceId === deviceId)?.alias?.trim() || deviceId;
 const clock = new Intl.DateTimeFormat(undefined, {hour: '2-digit', minute: '2-digit', second: '2-digit'});
 const dateTime = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
 const date = new Intl.DateTimeFormat(undefined, {month: 'short', day: 'numeric'});
 let span = 86400000, range = span, pinnedEnd = null;
 let points = [], sensorPoints = [], sensors = [], displayed, cursor = null, hoveredCanvas = null, request = 0;
+let latestSensorReadings = [];
 const selectedSensors = new Set();
 const knownSensors = new Set();
 let axisLimits = {};
@@ -163,6 +165,7 @@ async function refresh() {
 }
 
 function renderSensorMetrics(currentSensors) {
+  latestSensorReadings = currentSensors;
   const container = get('sensor-metrics');
   container.replaceChildren();
   for (const sensor of currentSensors) {
@@ -175,11 +178,20 @@ function renderSensorMetrics(currentSensors) {
     const identity = document.createElement('div');
     identity.className = 'sensor-card-identity';
     const id = document.createElement('strong');
-    id.textContent = sensor.deviceId;
+    id.textContent = sensorAlias(sensor.deviceId);
     const format = document.createElement('small');
     format.textContent = sensor.format || 'Sensor';
     identity.append(id, format);
     heading.append(identity);
+    if (sensor.deviceId && sensor.deviceId !== 'Mock data') {
+      const rename = document.createElement('button');
+      rename.className = 'alias-button';
+      rename.type = 'button';
+      rename.textContent = sensor.alias ? 'Edit alias' : 'Set alias';
+      rename.setAttribute('aria-label', `Set alias for sensor ${sensor.deviceId}`);
+      rename.addEventListener('click', () => { void editSensorAlias(sensor.deviceId); });
+      heading.append(rename);
+    }
     card.append(heading);
 
     const primary = document.createElement('div');
@@ -216,10 +228,31 @@ function renderSensorMetrics(currentSensors) {
   }
 }
 
+async function editSensorAlias(deviceId) {
+  const sensor = sensors.find(item => item.deviceId === deviceId);
+  const alias = window.prompt(`Alias for ${deviceId}. Leave blank to show the device ID.`, sensor?.alias || '');
+  if (alias === null) return;
+  try {
+    const response = await fetch('/api/sensors/' + encodeURIComponent(deviceId) + '/alias', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({alias})
+    });
+    if (!response.ok) throw new Error('Could not save sensor alias');
+    const result = await response.json();
+    if (sensor) sensor.alias = result.alias;
+    renderSensorToggles();
+    renderSensorMetrics(latestSensorReadings);
+    draw();
+  } catch (error) {
+    get('status').textContent = error.message;
+  }
+}
+
 function draw() {
   for (const chart of charts) render(chart);
   get('detail').textContent = cursor
-    ? [clock.format(cursor.at), cursor.deviceId || '', cursor.temperature == null ? '' : cursor.temperature.toFixed(1) + ' °C', cursor.humidity == null ? '' : cursor.humidity + '% RH', cursor.battery == null ? '' : cursor.battery + '% battery', cursor.millivolts == null ? '' : cursor.millivolts + ' mV', cursor.rssi == null ? '' : cursor.rssi + ' dBm'].filter(Boolean).join(' · ')
+    ? [clock.format(cursor.at), sensorAlias(cursor.deviceId), cursor.temperature == null ? '' : cursor.temperature.toFixed(1) + ' °C', cursor.humidity == null ? '' : cursor.humidity + '% RH', cursor.battery == null ? '' : cursor.battery + '% battery', cursor.millivolts == null ? '' : cursor.millivolts + ' mV', cursor.rssi == null ? '' : cursor.rssi + ' dBm'].filter(Boolean).join(' · ')
     : '';
 }
 
@@ -265,7 +298,7 @@ function nearestPointOnChart(canvas, field, clientX, clientY) {
 
 function drawHoverTooltip(ctx, canvas, point, px, py) {
   const lines = [];
-  const identity = [point.deviceId || 'Mock sensor', point.format].filter(Boolean).join(' · ');
+  const identity = [sensorAlias(point.deviceId) || 'Mock sensor', point.format].filter(Boolean).join(' · ');
   lines.push(identity, dateTime.format(point.at));
   const measurements = [];
   if (point.temperature != null) measurements.push(point.temperature.toFixed(2) + ' °C');
@@ -313,7 +346,7 @@ function renderSensorToggles() {
       axisLimits = {};
       draw();
     });
-    label.append(checkbox, document.createTextNode(`${sensor.deviceId} · ${sensor.format}`));
+    label.append(checkbox, document.createTextNode(`${sensorAlias(sensor.deviceId)} · ${sensor.format}`));
     list.append(label);
   }
 }

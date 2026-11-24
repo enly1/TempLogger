@@ -20,6 +20,7 @@ h1 { font-size: clamp(27px, 5vw, 38px); letter-spacing: -.045em; margin: 3px 0 0
 .sensor-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)); gap: 10px; margin-bottom: 18px; }
 .sensor-card { min-width: 0; padding: 13px 15px 11px; background: #18221e; border: 1px solid #283832; border-top: 3px solid var(--sensor-color, #72d7a9); border-radius: 12px; }
 .sensor-card-heading { display: flex; align-items: flex-start; justify-content: space-between; min-width: 0; }
+.alias-button { flex: 0 0 auto; padding: 4px 7px; color: #a1b4ac; font-size: 11px; }
 .sensor-card-identity { min-width: 0; }
 .sensor-card-identity strong { display: block; overflow: hidden; color: var(--sensor-color, #72d7a9); font: 13px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .sensor-card-identity small { display: block; margin-top: 3px; color: #a1b4ac; }

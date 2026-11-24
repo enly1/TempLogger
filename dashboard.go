@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -61,6 +62,7 @@ type dashboardSensorReading struct {
 
 type dashboardSensor struct {
 	DeviceID string `json:"deviceId"`
+	Alias    string `json:"alias"`
 	Format   string `json:"format"`
 }
 
@@ -152,6 +154,16 @@ func saveSensorObservation(ctx context.Context, db interface {
 		observation.RSSI, observation.Time.UnixNano())
 }
 
+func getSensorAlias(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, deviceID string) string {
+	var alias string
+	if err := db.QueryRowContext(ctx, "SELECT alias FROM sensor_aliases WHERE device_id = ?", deviceID).Scan(&alias); err != nil {
+		return ""
+	}
+	return alias
+}
+
 func describeSensorMetric(value *float64, format string, args ...any) string {
 	if value == nil {
 		return "n/a"
@@ -159,13 +171,17 @@ func describeSensorMetric(value *float64, format string, args ...any) string {
 	return fmt.Sprintf(format, append([]any{*value}, args...)...)
 }
 
-func logSensorObservation(observation sensorObservation) {
+func logSensorObservation(observation sensorObservation, alias string) {
 	packet := ""
 	if observation.Counter != nil {
 		packet = fmt.Sprintf(" packet #%d", *observation.Counter)
 	}
+	label := strings.TrimSpace(alias)
+	if label == "" {
+		label = observation.DeviceID
+	}
 	log.Printf("BLE sensor %s [%s, %s] RSSI %d dBm | temperature %s | humidity %s | battery %s | voltage %s%s",
-		observation.DeviceID, observation.DeviceID, observation.Format, observation.RSSI,
+		observation.DeviceID, label, observation.Format, observation.RSSI,
 		describeSensorMetric(observation.Temperature, "%.2f°C"),
 		describeSensorMetric(observation.Humidity, "%.1f%%"),
 		describeSensorMetric(observation.Battery, "%.0f%%"),
@@ -225,6 +241,9 @@ func initHistory(ctx context.Context, db *sql.DB, csvPath string) error {
 			PRIMARY KEY(at, device_id, format)
 		);
 		CREATE INDEX IF NOT EXISTS sensor_readings_at ON sensor_readings(at);
+		CREATE TABLE IF NOT EXISTS sensor_aliases (
+			device_id TEXT PRIMARY KEY, alias TEXT NOT NULL
+		);
 	`); err != nil {
 		return err
 	}
@@ -456,9 +475,10 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 		sendJSON(w, points)
 	})
 	mux.HandleFunc("GET /api/sensors", func(w http.ResponseWriter, r *http.Request) {
-		rows, err := db.QueryContext(r.Context(), `SELECT device_id,
-			GROUP_CONCAT(DISTINCT format) FROM sensor_readings
-			GROUP BY device_id ORDER BY device_id`)
+		rows, err := db.QueryContext(r.Context(), `SELECT readings.device_id, COALESCE(aliases.alias, ''),
+			GROUP_CONCAT(DISTINCT readings.format) FROM sensor_readings AS readings
+			LEFT JOIN sensor_aliases AS aliases ON aliases.device_id = readings.device_id
+			GROUP BY readings.device_id, aliases.alias ORDER BY readings.device_id`)
 		if err != nil {
 			http.Error(w, "Could not read sensors", http.StatusInternalServerError)
 			return
@@ -467,7 +487,7 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 		sensors := make([]dashboardSensor, 0)
 		for rows.Next() {
 			var sensor dashboardSensor
-			if err := rows.Scan(&sensor.DeviceID, &sensor.Format); err != nil {
+			if err := rows.Scan(&sensor.DeviceID, &sensor.Alias, &sensor.Format); err != nil {
 				http.Error(w, "Could not read sensors", http.StatusInternalServerError)
 				return
 			}
@@ -478,6 +498,39 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 			return
 		}
 		sendJSON(w, sensors)
+	})
+	mux.HandleFunc("PUT /api/sensors/{deviceId}/alias", func(w http.ResponseWriter, r *http.Request) {
+		deviceID := strings.TrimSpace(r.PathValue("deviceId"))
+		if deviceID == "" || len(deviceID) > 128 {
+			http.Error(w, "Expected a valid sensor ID", http.StatusBadRequest)
+			return
+		}
+		var request struct {
+			Alias string `json:"alias"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 2048)
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "Expected a JSON alias", http.StatusBadRequest)
+			return
+		}
+		request.Alias = strings.TrimSpace(request.Alias)
+		if len(request.Alias) > 120 {
+			http.Error(w, "Alias must be 120 bytes or fewer", http.StatusBadRequest)
+			return
+		}
+		var err error
+		if request.Alias == "" {
+			_, err = db.ExecContext(r.Context(), "DELETE FROM sensor_aliases WHERE device_id = ?", deviceID)
+		} else {
+			_, err = db.ExecContext(r.Context(), `INSERT INTO sensor_aliases(device_id, alias) VALUES(?, ?)
+				ON CONFLICT(device_id) DO UPDATE SET alias = excluded.alias`, deviceID, request.Alias)
+		}
+		if err != nil {
+			log.Print(err)
+			http.Error(w, "Could not save sensor alias", http.StatusInternalServerError)
+			return
+		}
+		sendJSON(w, map[string]string{"deviceId": deviceID, "alias": request.Alias})
 	})
 	mux.HandleFunc("GET /api/sensor-readings", func(w http.ResponseWriter, r *http.Request) {
 		from, fromErr := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
@@ -634,7 +687,7 @@ func collectLocalSensors(ctx context.Context, db *sql.DB, events chan<- event) {
 					}
 					seen[fingerprint] = *observation.Counter
 				}
-				logSensorObservation(observation)
+				logSensorObservation(observation, getSensorAlias(ctx, db, observation.DeviceID))
 				if _, err := saveSensorObservation(ctx, db, observation); err != nil {
 					select {
 					case events <- event{err: fmt.Errorf("saving sensor reading: %w", err)}:
@@ -707,7 +760,7 @@ func collectProxySensors(ctx context.Context, host, key string, db *sql.DB, even
 						}
 						seen[fingerprint] = *observation.Counter
 					}
-					logSensorObservation(observation)
+					logSensorObservation(observation, getSensorAlias(ctx, db, observation.DeviceID))
 					if _, err := saveSensorObservation(ctx, db, observation); err != nil {
 						select {
 						case events <- event{err: fmt.Errorf("saving sensor reading: %w", err)}:
