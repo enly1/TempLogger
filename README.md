@@ -13,9 +13,10 @@ container's local connection using its numeric UID. By default the image uses
 UID 10001 and GID 987; set `TEMPLATELOGGER_UID` and
 `TEMPLATELOGGER_GID` to match a host account accepted by the VM's system bus
 and BlueZ policy if needed. Ensure that account's UID exists on the VM and that
-the data volume is writable by the selected UID. The container is not given
-privileged mode or host networking. The default ESPHome proxy is
-`192.168.1.252:6053`.
+the data volume is writable by the selected UID. Compose disables AppArmor
+confinement for this container so it can use the host's system D-Bus; the
+container remains non-root and does not use privileged mode or host networking.
+The default ESPHome proxy is `192.168.1.252:6053`.
 
 Before deploying in Arcane:
 

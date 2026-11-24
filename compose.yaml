@@ -5,6 +5,8 @@ services:
     pull_policy: always
     restart: unless-stopped
     user: "${TEMPLATELOGGER_UID:-10001}:${TEMPLATELOGGER_GID:-987}"
+    security_opt:
+      - apparmor=unconfined
     ports:
       - "9000:9000"
     environment:
