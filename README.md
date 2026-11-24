@@ -5,7 +5,11 @@
 The root `compose.yaml` is ready to deploy from Arcane. It pulls the private
 `enly1/templogger:latest` image for `linux/amd64`, publishes the dashboard on
 host port `9000` to container port `9000`, and stores SQLite and CSV data in the
-named `templogger_data` volume. The default ESPHome proxy is `192.168.1.252:6053`.
+named `templogger_data` volume. It runs proxy collection and local BLE scanning
+at the same time. Local scanning uses the Docker host's BlueZ service through
+`/run/dbus/system_bus_socket`, so deploy it to a Linux host with a working
+Bluetooth adapter and BlueZ running. The default ESPHome proxy is
+`192.168.1.252:6053`.
 
 Before deploying in Arcane:
 

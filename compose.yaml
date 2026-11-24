@@ -9,8 +9,18 @@ services:
     environment:
       TZ: Europe/London
       ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
+    command:
+      - --web
+      - --bind
+      - 0.0.0.0
+      - --db
+      - /data/readings.sqlite
+      - --file
+      - /data/readings.csv
+      - --local-ble
     volumes:
       - templogger_data:/data
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
 volumes:
   templogger_data:
     name: templogger_data
