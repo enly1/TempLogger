@@ -8,7 +8,13 @@ host port `9000` to container port `9000`, and stores SQLite and CSV data in the
 named `templogger_data` volume. It runs proxy collection and local BLE scanning
 at the same time. Local scanning uses the Docker host's BlueZ service through
 `/run/dbus/system_bus_socket`, so deploy it to a Linux host with a working
-Bluetooth adapter and BlueZ running. The default ESPHome proxy is
+Bluetooth adapter and BlueZ running. The system bus authenticates the
+container's local connection using its numeric UID. By default the image uses
+UID and GID 10001; set `TEMPLATELOGGER_UID` and
+`TEMPLATELOGGER_GID` to a host account accepted by the VM's system bus and
+BlueZ policy if needed. Ensure that account's UID exists on the VM and that
+the data volume is writable by the selected UID. The container is not given
+privileged mode or host networking. The default ESPHome proxy is
 `192.168.1.252:6053`.
 
 Before deploying in Arcane:

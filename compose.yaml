@@ -4,6 +4,7 @@ services:
     platform: linux/amd64
     pull_policy: always
     restart: unless-stopped
+    user: "${TEMPLATELOGGER_UID:-10001}:${TEMPLATELOGGER_GID:-10001}"
     ports:
       - "9000:9000"
     environment:
