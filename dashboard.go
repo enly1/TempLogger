@@ -399,7 +399,36 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 			http.Error(w, "Could not read history", http.StatusInternalServerError)
 			return
 		}
-		sendJSON(w, map[string]any{"latest": latest, "first": first.Int64 / int64(time.Millisecond),
+		rows, err := db.QueryContext(r.Context(), `WITH ranked AS (
+			SELECT at, device_id, format, temperature, humidity, battery, millivolts, rssi,
+			ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY at DESC) AS row_number
+			FROM sensor_readings
+		) SELECT at, device_id, format, temperature, humidity, battery, millivolts, rssi
+		FROM ranked WHERE row_number = 1 ORDER BY device_id`)
+		if err != nil {
+			log.Print(err)
+			http.Error(w, "Could not read current sensor values", http.StatusInternalServerError)
+			return
+		}
+		latestSensors := make([]dashboardSensorReading, 0)
+		for rows.Next() {
+			var sensor dashboardSensorReading
+			if err := rows.Scan(&sensor.At, &sensor.DeviceID, &sensor.Format, &sensor.Temperature, &sensor.Humidity, &sensor.Battery, &sensor.Millivolts, &sensor.RSSI); err != nil {
+				rows.Close()
+				http.Error(w, "Could not read current sensor values", http.StatusInternalServerError)
+				return
+			}
+			sensor.At /= int64(time.Millisecond)
+			latestSensors = append(latestSensors, sensor)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			log.Print(err)
+			http.Error(w, "Could not read current sensor values", http.StatusInternalServerError)
+			return
+		}
+		rows.Close()
+		sendJSON(w, map[string]any{"latest": latest, "latestSensors": latestSensors, "first": first.Int64 / int64(time.Millisecond),
 			"interval": interval.Milliseconds(), "state": status.Load(), "now": time.Now().UnixMilli()})
 	})
 	mux.HandleFunc("GET /api/readings", func(w http.ResponseWriter, r *http.Request) {

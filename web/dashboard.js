@@ -147,22 +147,72 @@ async function refresh() {
       }
       displayed = {from, to, key};
     }
-    const latest = mockMode ? points[points.length - 1] : sensorPoints[sensorPoints.length - 1] ?? next.latest;
+    const currentSensors = mockMode
+      ? (points.length ? [{...points[points.length - 1], deviceId: 'Mock data', format: 'Preview'}] : [])
+      : (next.latestSensors?.length ? next.latestSensors : next.latest ? [{...next.latest, deviceId: 'Sensor', format: 'ATC'}] : []);
+    renderSensorMetrics(currentSensors);
     get('status').textContent = mockMode ? 'Mock data · local preview' : next.state;
-    get('temperature').textContent = latest?.temperature != null ? latest.temperature.toFixed(1) + ' °C' : '—';
-    get('humidity').textContent = latest?.humidity != null ? latest.humidity + '%' : '—';
-    get('battery').textContent = latest?.battery != null ? latest.battery + '%' : '—';
-    get('battery-voltage').textContent = latest?.millivolts > 0
-      ? (latest.millivolts / 1000).toFixed(3) + ' V · sensor estimate'
-      : 'Sensor estimate';
-    get('seen').textContent = latest ? dateTime.format(latest.at) : '—';
-    if (!mockMode && latest && next.state === 'Collecting' && next.now - latest.at > Math.max(90000, next.interval * 3)) {
+    if (!mockMode && next.latest && next.state === 'Collecting' && next.now - next.latest.at > Math.max(90000, next.interval * 3)) {
       get('status').textContent = 'Waiting for a new reading';
     }
     get('window').textContent = dateTime.format(displayed.from) + ' – ' + dateTime.format(displayed.to);
     draw();
   } catch (error) {
     if (version === request) get('status').textContent = error.message;
+  }
+}
+
+function renderSensorMetrics(currentSensors) {
+  const container = get('sensor-metrics');
+  container.replaceChildren();
+  for (const sensor of currentSensors) {
+    const card = document.createElement('article');
+    card.className = 'sensor-card';
+    card.style.setProperty('--sensor-color', sensorColor(sensor.deviceId));
+
+    const heading = document.createElement('div');
+    heading.className = 'sensor-card-heading';
+    const identity = document.createElement('div');
+    identity.className = 'sensor-card-identity';
+    const id = document.createElement('strong');
+    id.textContent = sensor.deviceId;
+    const format = document.createElement('small');
+    format.textContent = sensor.format || 'Sensor';
+    identity.append(id, format);
+    heading.append(identity);
+    card.append(heading);
+
+    const primary = document.createElement('div');
+    primary.className = 'sensor-primary';
+    const primaryLabel = document.createElement('span');
+    primaryLabel.textContent = 'Temperature';
+    const temperature = document.createElement('strong');
+    temperature.textContent = sensor.temperature == null ? '—' : sensor.temperature.toFixed(1) + ' °C';
+    primary.append(primaryLabel, temperature);
+    card.append(primary);
+
+    const stats = document.createElement('dl');
+    stats.className = 'sensor-stats';
+    const addStat = (label, value) => {
+      const wrapper = document.createElement('div');
+      const term = document.createElement('dt');
+      term.textContent = label;
+      const description = document.createElement('dd');
+      description.textContent = value;
+      wrapper.append(term, description);
+      stats.append(wrapper);
+    };
+    addStat('Humidity', sensor.humidity == null ? '—' : sensor.humidity.toFixed(1) + '%');
+    addStat('Battery', sensor.battery == null ? '—' : sensor.battery.toFixed(0) + '%');
+    addStat('Voltage', sensor.millivolts == null ? '—' : (sensor.millivolts / 1000).toFixed(3) + ' V');
+    addStat('Signal', sensor.rssi == null ? '—' : sensor.rssi + ' dBm');
+    card.append(stats);
+
+    const updated = document.createElement('small');
+    updated.className = 'sensor-updated';
+    updated.textContent = sensor.at ? 'Updated ' + dateTime.format(sensor.at) : 'Waiting for a reading';
+    card.append(updated);
+    container.append(card);
   }
 }
 
