@@ -168,30 +168,32 @@ function renderSensorMetrics(currentSensors) {
   latestSensorReadings = currentSensors;
   const container = get('sensor-metrics');
   container.replaceChildren();
-  for (const sensor of currentSensors) {
+  const displaySensors = [
+    ...currentSensors,
+    {placeholder: true, placeholderName: 'New sensor 1'},
+    {placeholder: true, placeholderName: 'New sensor 2'}
+  ];
+  for (const sensor of displaySensors) {
     const card = document.createElement('article');
-    card.className = 'sensor-card';
-    card.style.setProperty('--sensor-color', sensorColor(sensor.deviceId));
+    card.className = sensor.placeholder ? 'sensor-card sensor-card-placeholder' : 'sensor-card';
+    if (!sensor.placeholder) card.style.setProperty('--sensor-color', sensorColor(sensor.deviceId));
 
     const heading = document.createElement('div');
     heading.className = 'sensor-card-heading';
-    const identity = document.createElement('div');
-    identity.className = 'sensor-card-identity';
+    const canEditAlias = !sensor.placeholder && sensor.deviceId && sensor.deviceId !== 'Mock data';
+    const identity = document.createElement(canEditAlias ? 'button' : 'div');
+    identity.className = canEditAlias ? 'sensor-card-identity sensor-name-button' : 'sensor-card-identity';
+    if (canEditAlias) {
+      identity.type = 'button';
+      identity.setAttribute('aria-label', `${sensor.alias ? 'Edit' : 'Set'} alias for sensor ${sensor.deviceId}`);
+      identity.addEventListener('click', () => { void editSensorAlias(sensor.deviceId); });
+    }
     const id = document.createElement('strong');
-    id.textContent = sensorAlias(sensor.deviceId);
+    id.textContent = sensor.placeholder ? sensor.placeholderName : sensorAlias(sensor.deviceId);
     const format = document.createElement('small');
-    format.textContent = sensor.format || 'Sensor';
+    format.textContent = sensor.placeholder ? 'Preview placeholder' : sensor.format || 'Sensor';
     identity.append(id, format);
     heading.append(identity);
-    if (sensor.deviceId && sensor.deviceId !== 'Mock data') {
-      const rename = document.createElement('button');
-      rename.className = 'alias-button';
-      rename.type = 'button';
-      rename.textContent = sensor.alias ? 'Edit alias' : 'Set alias';
-      rename.setAttribute('aria-label', `Set alias for sensor ${sensor.deviceId}`);
-      rename.addEventListener('click', () => { void editSensorAlias(sensor.deviceId); });
-      heading.append(rename);
-    }
     card.append(heading);
 
     const primary = document.createElement('div');
@@ -222,7 +224,7 @@ function renderSensorMetrics(currentSensors) {
 
     const updated = document.createElement('small');
     updated.className = 'sensor-updated';
-    updated.textContent = sensor.at ? 'Updated ' + dateTime.format(sensor.at) : 'Waiting for a reading';
+    updated.textContent = sensor.placeholder ? 'Waiting for a new sensor' : sensor.at ? 'Updated ' + dateTime.format(sensor.at) : 'Waiting for a reading';
     card.append(updated);
     container.append(card);
   }
