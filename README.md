@@ -3,10 +3,12 @@
 ## Docker and Arcane deployment
 
 The root `compose.yaml` is ready to deploy from Arcane. It pulls the private
-`enly1/templogger:latest` image for `linux/amd64`, publishes the dashboard on
-host port `9000` to container port `9000`, and stores SQLite and CSV data in the
-named `templogger_data` volume. It runs proxy collection and local BLE scanning
-at the same time. Local scanning uses the Docker host's BlueZ service through
+`enly1/templogger:latest` image for `linux/amd64`, serves the dashboard directly
+on host port `9000`, and stores SQLite and CSV data in the named
+`templogger_data` volume. It collects from two configured ESPHome proxies and
+the local BLE adapter at the same time. The proxy names are resolved through
+mDNS, so the container uses host networking to receive multicast traffic.
+Local Bluetooth scanning uses the Docker host's BlueZ service through
 `/run/dbus/system_bus_socket`, so deploy it to a Linux host with a working
 Bluetooth adapter and BlueZ running. The system bus authenticates the
 container's local connection using its numeric UID. By default the image uses
@@ -14,9 +16,8 @@ UID 10001 and GID 987; set `TEMPLATELOGGER_UID` and
 `TEMPLATELOGGER_GID` to match a host account accepted by the VM's system bus
 and BlueZ policy if needed. Ensure that account's UID exists on the VM and that
 the data volume is writable by the selected UID. Compose disables AppArmor
-confinement for this container so it can use the host's system D-Bus; the
-container remains non-root and does not use privileged mode or host networking.
-The default ESPHome proxy is `192.168.1.252:6053`.
+confinement for this container so it can use the host's system D-Bus. The
+container remains non-root and does not use privileged mode.
 
 Before deploying in Arcane:
 
@@ -65,7 +66,7 @@ cd /path/to/TempLogger
 
 Open [the local dashboard](http://127.0.0.1:9000). It shows temperature, humidity, battery, battery voltage, signal strength, and the latest reading time. Each sensor has a current metrics card. Click a sensor name or MAC to save or edit its location alias in SQLite; the alias replaces its device ID in the dashboard and live logs. When proxy sensors are detected, use **Visible sensors** to turn each sensor on or off across the charts; all discovered sensors start enabled. The proxy collector records decodable ATC, PVVX, BTHome v2, and unencrypted Xiaomi MiBeacon service data. Select a range from **5m** through **45m**, or choose **1h**, **6h**, **24h**, **7d**, **30d**, or **All**. Charts default to **Smooth**, which draws a curve through sampled readings; select **Raw** to show straight segments and reading markers. Left-drag across any chart to zoom into a time window; right-drag to select readings for deletion, then confirm to remove the selected records from SQLite. Use the arrows or range buttons to navigate back out. Enable **Mock data** to preview generated readings without collected sensor data; windows of five minutes or less use one-second samples to show a dense chart, while longer windows stay evenly sampled across their full timeline. Switch it off to return to the API readings. Hover over a point for its values. **Live** returns to the latest window. API sampling targets two timeline buckets per chart pixel, capped at 5,000 buckets, while preserving bucket endpoints and available metric extremes. Ranges under one hour retain at least 60 evenly distributed actual readings when that many exist. Zoom in to see individual readings.
 
-TempLogger requests passive scanning from proxies that support remote scan-mode control. Otherwise, set the ESPHome BLE tracker scan parameters to passive in the proxy configuration. In web mode, `--local-ble` adds the computer's Bluetooth adapter as a second simultaneous collector alongside the proxy. Sensor counters deduplicate repeated measurements heard by both collectors. Outside web mode, `--local-ble` selects the local adapter instead of the proxy. Set `--interval 1m` or `--interval 15m` to save at most one unique reading per interval; this does not change the sensor's broadcast cadence or reduce its radio transmissions. Collection continues while the browser is closed as long as the Go process and its collectors are running. Press **Ctrl-C** to stop the process. `--proxy HOST[:PORT]` changes the proxy address, `--proxy-key KEY` supplies its API encryption key, and `--local-ble` enables local Bluetooth scanning.
+TempLogger requests passive scanning from proxies that support remote scan-mode control. Otherwise, set the ESPHome BLE tracker scan parameters to passive in the proxy configuration. In web mode, `--local-ble` adds the computer's Bluetooth adapter as a second simultaneous collector alongside the proxy. Use `--proxies HOST1,HOST2` in web mode to collect from multiple ESPHome proxies; this overrides `--proxy`. Sensor counters deduplicate repeated measurements heard by multiple collectors. Outside web mode, `--local-ble` selects the local adapter instead of the proxy. Set `--interval 1m` or `--interval 15m` to save at most one unique reading per interval; this does not change the sensor's broadcast cadence or reduce its radio transmissions. Collection continues while the browser is closed as long as the Go process and its collectors are running. Press **Ctrl-C** to stop the process. `--proxy HOST[:PORT]` changes the single proxy address, `--proxy-key KEY` supplies the API encryption key, and `--local-ble` enables local Bluetooth scanning.
 
 Use `./templogger --scan --scan-seconds 30` to list advertisements received through the proxy, or `./templogger --scan-local --scan-seconds 30` to scan with this computer's Bluetooth adapter. Both commands print each distinct advertisement as it arrives, using the same labeled fields for address, scanner ID, RSSI, raw advertisement data, service UUIDs and data, manufacturer data, and decoded readings. Device names are omitted so local and proxy scans use consistent output. Temperature decoding is attempted for ATC, PVVX, BTHome v2, and unencrypted Xiaomi MiBeacon data objects. The local Bluetooth stack may provide an OS-specific scanner ID and may not expose raw advertisement bytes; those fields are identified in the output. Local scanning may require Bluetooth permissions from the operating system. Use `./templogger --proxy-logs` to stream the proxy's ESPHome logs remotely. The proxy scan and proxy logs help confirm whether the proxy is hearing the sensor and whether the API subscription is active.
 

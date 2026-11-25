@@ -455,6 +455,26 @@ func proxyAddress(host string) string {
 	return net.JoinHostPort(host, "6053")
 }
 
+func parseProxyHosts(configured, fallback string) ([]string, error) {
+	if strings.TrimSpace(configured) == "" {
+		return []string{fallback}, nil
+	}
+	var hosts []string
+	seen := make(map[string]struct{})
+	for _, host := range strings.Split(configured, ",") {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			return nil, errors.New("--proxies must contain comma-separated, non-empty host names")
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	return hosts, nil
+}
+
 func subscribeProxyAdvertisements(client *esphome.Client, handler func(proto.Message)) (func(), error) {
 	removeRaw := client.On(93, handler)
 	removeLegacy := client.On(67, handler)
@@ -1712,6 +1732,7 @@ func main() {
 	view := flag.Bool("view", false, "view existing readings without Bluetooth")
 	web := flag.Bool("web", false, "serve the local dashboard and collect into SQLite")
 	proxy := flag.String("proxy", "192.168.1.252", "ESPHome Bluetooth proxy host or host:port (default port 6053)")
+	proxies := flag.String("proxies", "", "comma-separated ESPHome proxy hosts for web mode; overrides --proxy")
 	proxyKey := flag.String("proxy-key", os.Getenv("ESPHOME_API_KEY"), "ESPHome API encryption key (or set ESPHOME_API_KEY)")
 	localBLE := flag.Bool("local-ble", false, "use local Bluetooth instead of proxy outside web mode; add local scanning in web mode")
 	scan := flag.Bool("scan", false, "list nearby BLE advertisements received through the proxy, then exit")
@@ -1725,6 +1746,15 @@ func main() {
 	bind := flag.String("bind", "127.0.0.1", "dashboard listen address")
 	db := flag.String("db", "readings.sqlite", "SQLite database for dashboard mode")
 	flag.Parse()
+	if *proxies != "" && !*web {
+		fmt.Fprintln(os.Stderr, "--proxies can only be used with --web")
+		os.Exit(2)
+	}
+	proxyHosts, err := parseProxyHosts(*proxies, *proxy)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	if (*scan && *scanLocal) || ((*scan || *scanLocal) && (*proxyLogs || *sensorConfig || *sensorATC1441Defaults)) ||
 		(*proxyLogs && (*sensorConfig || *sensorATC1441Defaults)) || (*sensorConfig && *sensorATC1441Defaults) {
 		fmt.Fprintln(os.Stderr, "--scan, --scan-local, --proxy-logs, --sensor-config, and --sensor-atc1441-defaults are separate modes")
@@ -1825,7 +1855,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "use a positive interval and a valid port; --web cannot be combined with --no-ui")
 			os.Exit(2)
 		}
-		if err := runDashboard(*db, *path, *bind, *port, *interval, *view, *proxy, *proxyKey, *localBLE); err != nil {
+		if err := runDashboard(*db, *path, *bind, *port, *interval, *view, proxyHosts, *proxyKey, *localBLE); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

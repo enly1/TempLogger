@@ -7,8 +7,7 @@ services:
     user: "${TEMPLATELOGGER_UID:-10001}:${TEMPLATELOGGER_GID:-987}"
     security_opt:
       - apparmor=unconfined
-    ports:
-      - "9000:9000"
+    network_mode: host
     environment:
       TZ: Europe/London
       ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
@@ -21,6 +20,8 @@ services:
       - --file
       - /data/readings.csv
       - --local-ble
+      - --proxies
+      - esp32-bluetooth-proxy-8f3b98.local,esp32-bluetooth-proxy-8d1244.local
     volumes:
       - templogger_data:/data
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket

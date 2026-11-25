@@ -716,7 +716,7 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 	return mux
 }
 
-func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration, viewOnly bool, proxyHost, proxyKey string, localBLE bool) error {
+func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration, viewOnly bool, proxyHosts []string, proxyKey string, localBLE bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	addr := net.JoinHostPort(bind, fmt.Sprint(port))
@@ -733,11 +733,11 @@ func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration
 	var status atomic.Value
 	status.Store("History only")
 	if !viewOnly {
-		status.Store("Connecting to Bluetooth proxy")
+		status.Store("Connecting to Bluetooth proxies")
 		if localBLE {
-			status.Store("Connecting to proxy · scanning locally")
+			status.Store("Connecting to Bluetooth proxies · scanning locally")
 		}
-		go runDashboardCollector(ctx, db, interval, &status, proxyHost, proxyKey, localBLE)
+		go runDashboardCollector(ctx, db, interval, &status, proxyHosts, proxyKey, localBLE)
 	}
 	server := &http.Server{Handler: dashboardHandler(db, interval, &status),
 		ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
@@ -759,10 +759,12 @@ func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration
 	return nil
 }
 
-func runDashboardCollector(ctx context.Context, db *sql.DB, _ time.Duration, status *atomic.Value, proxyHost, proxyKey string, localBLE bool) {
+func runDashboardCollector(ctx context.Context, db *sql.DB, _ time.Duration, status *atomic.Value, proxyHosts []string, proxyKey string, localBLE bool) {
 	events := make(chan event, 1)
 	sink := &sensorObservationSink{db: db, events: events, seen: make(map[string]uint8), values: make(map[string]sensorObservationVersion)}
-	go collectProxySensors(ctx, proxyHost, proxyKey, sink)
+	for _, host := range proxyHosts {
+		go collectProxySensors(ctx, host, proxyKey, sink)
+	}
 	if localBLE {
 		log.Print("Requested local BLE scanning")
 		go collectLocalSensors(ctx, sink)
@@ -826,6 +828,7 @@ func collectLocalSensors(ctx context.Context, sink *sensorObservationSink) {
 
 func collectProxySensors(ctx context.Context, host, key string, sink *sensorObservationSink) {
 	address := proxyAddress(host)
+	log.Printf("Scanning ESPHome proxy %s", address)
 	for ctx.Err() == nil {
 		opts := []esphome.Option{esphome.WithClientInfo("TempLogger dashboard sensor collector")}
 		if key != "" {
