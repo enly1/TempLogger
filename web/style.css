@@ -19,8 +19,6 @@ h1 { font-size: clamp(27px, 5vw, 38px); letter-spacing: -.045em; margin: 3px 0 0
 .readings strong { font-size: clamp(18px, 3vw, 25px); display: block; margin-top: 7px; font-variant-numeric: tabular-nums; }
 .sensor-metrics { display: flex; flex-flow: row nowrap; align-items: stretch; gap: 10px; margin-bottom: 18px; overflow-x: auto; padding-bottom: 4px; }
 .sensor-card { flex: 1 1 180px; min-width: 180px; max-width: calc((100% - 30px) / 4); padding: 13px 15px 11px; background: #18221e; border: 1px solid #283832; border-top: 3px solid var(--sensor-color, #72d7a9); border-radius: 12px; }
-.sensor-card-placeholder { background: transparent; border: 1px dashed #40524a; border-top: 3px dashed #60776b; }
-.sensor-card-placeholder .sensor-card-identity strong, .sensor-card-placeholder .sensor-primary strong { color: #84988e; }
 .sensor-card-heading { display: flex; align-items: flex-start; justify-content: space-between; min-width: 0; }
 .sensor-card-identity { min-width: 0; }
 .sensor-name-button { display: block; width: 100%; padding: 0; border: 0; border-radius: 4px; background: transparent; text-align: left; }

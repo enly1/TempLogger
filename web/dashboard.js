@@ -168,19 +168,14 @@ function renderSensorMetrics(currentSensors) {
   latestSensorReadings = currentSensors;
   const container = get('sensor-metrics');
   container.replaceChildren();
-  const displaySensors = [
-    ...currentSensors,
-    {placeholder: true, placeholderName: 'New sensor 1'},
-    {placeholder: true, placeholderName: 'New sensor 2'}
-  ];
-  for (const sensor of displaySensors) {
+  for (const sensor of currentSensors) {
     const card = document.createElement('article');
-    card.className = sensor.placeholder ? 'sensor-card sensor-card-placeholder' : 'sensor-card';
-    if (!sensor.placeholder) card.style.setProperty('--sensor-color', sensorColor(sensor.deviceId));
+    card.className = 'sensor-card';
+    card.style.setProperty('--sensor-color', sensorColor(sensor.deviceId));
 
     const heading = document.createElement('div');
     heading.className = 'sensor-card-heading';
-    const canEditAlias = !sensor.placeholder && sensor.deviceId && sensor.deviceId !== 'Mock data';
+    const canEditAlias = sensor.deviceId && sensor.deviceId !== 'Mock data';
     const identity = document.createElement(canEditAlias ? 'button' : 'div');
     identity.className = canEditAlias ? 'sensor-card-identity sensor-name-button' : 'sensor-card-identity';
     if (canEditAlias) {
@@ -189,9 +184,9 @@ function renderSensorMetrics(currentSensors) {
       identity.addEventListener('click', () => { void editSensorAlias(sensor.deviceId); });
     }
     const id = document.createElement('strong');
-    id.textContent = sensor.placeholder ? sensor.placeholderName : sensorAlias(sensor.deviceId);
+    id.textContent = sensorAlias(sensor.deviceId);
     const format = document.createElement('small');
-    format.textContent = sensor.placeholder ? 'Preview placeholder' : sensor.format || 'Sensor';
+    format.textContent = sensor.format || 'Sensor';
     identity.append(id, format);
     heading.append(identity);
     card.append(heading);
@@ -224,7 +219,7 @@ function renderSensorMetrics(currentSensors) {
 
     const updated = document.createElement('small');
     updated.className = 'sensor-updated';
-    updated.textContent = sensor.placeholder ? 'Waiting for a new sensor' : sensor.at ? 'Updated ' + dateTime.format(sensor.at) : 'Waiting for a reading';
+    updated.textContent = sensor.at ? 'Updated ' + dateTime.format(sensor.at) : 'Waiting for a reading';
     card.append(updated);
     container.append(card);
   }
