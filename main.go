@@ -52,6 +52,19 @@ type sensorObservation struct {
 
 func floatPtr(value float64) *float64 { return &value }
 
+func normalizeSensorDeviceID(deviceID string) string {
+	compact := strings.NewReplacer(":", "", "-", "").Replace(strings.TrimSpace(deviceID))
+	if len(compact) != 12 {
+		return deviceID
+	}
+	for _, char := range compact {
+		if (char < '0' || char > '9') && (char < 'A' || char > 'F') && (char < 'a' || char > 'f') {
+			return deviceID
+		}
+	}
+	return strings.ToUpper(compact)
+}
+
 func decodeATC(p []byte, rssi int) (reading, bool) {
 	if len(p) != 13 || fmt.Sprintf("%02X:%02X:%02X:%02X:%02X:%02X", p[0], p[1], p[2], p[3], p[4], p[5]) != sensorMAC {
 		return reading{}, false
@@ -716,6 +729,7 @@ func decodeSensorObservations(adv scanAdvertisement) []sensorObservation {
 			continue
 		}
 		if observation.Format != "" && (observation.Temperature != nil || observation.Humidity != nil || observation.Battery != nil || observation.Millivolts != nil) {
+			observation.DeviceID = normalizeSensorDeviceID(observation.DeviceID)
 			observations = append(observations, observation)
 		}
 	}

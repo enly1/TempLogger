@@ -213,6 +213,7 @@ func observationFingerprint(observation sensorObservation) string {
 }
 
 func (sink *sensorObservationSink) record(ctx context.Context, observation sensorObservation, source string) {
+	observation.DeviceID = normalizeSensorDeviceID(observation.DeviceID)
 	key := observation.DeviceID + "/" + observation.Format
 	sink.mu.Lock()
 	if observation.Counter != nil {
@@ -284,6 +285,67 @@ func openHistory(ctx context.Context, dbPath, csvPath string) (*sql.DB, error) {
 	return db, nil
 }
 
+func normalizeStoredSensorDeviceIDs(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, "SELECT DISTINCT device_id FROM sensor_readings")
+	if err != nil {
+		return err
+	}
+	var deviceIDs []string
+	for rows.Next() {
+		var deviceID string
+		if err := rows.Scan(&deviceID); err != nil {
+			rows.Close()
+			return err
+		}
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, oldID := range deviceIDs {
+		canonicalID := normalizeSensorDeviceID(oldID)
+		if canonicalID == oldID {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sensor_readings
+			(at, device_id, name, format, temperature, humidity, battery, millivolts, rssi)
+			SELECT at, ?, name, format, temperature, humidity, battery, millivolts, rssi
+			FROM sensor_readings WHERE device_id = ?
+			ON CONFLICT(at, device_id, format) DO UPDATE SET
+				name = CASE WHEN sensor_readings.name = '' THEN excluded.name ELSE sensor_readings.name END,
+				temperature = COALESCE(sensor_readings.temperature, excluded.temperature),
+				humidity = COALESCE(sensor_readings.humidity, excluded.humidity),
+				battery = COALESCE(sensor_readings.battery, excluded.battery),
+				millivolts = COALESCE(sensor_readings.millivolts, excluded.millivolts),
+				rssi = MAX(sensor_readings.rssi, excluded.rssi)`, canonicalID, oldID); err != nil {
+			return fmt.Errorf("merge sensor readings for %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM sensor_readings WHERE device_id = ?", oldID); err != nil {
+			return fmt.Errorf("remove old sensor readings for %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sensor_aliases(device_id, alias)
+			SELECT ?, alias FROM sensor_aliases WHERE device_id = ?
+			ON CONFLICT(device_id) DO NOTHING`, canonicalID, oldID); err != nil {
+			return fmt.Errorf("merge sensor alias for %s: %w", oldID, err)
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM sensor_aliases WHERE device_id = ?", oldID); err != nil {
+			return fmt.Errorf("remove old sensor alias for %s: %w", oldID, err)
+		}
+	}
+	return tx.Commit()
+}
+
 func initHistory(ctx context.Context, db *sql.DB, csvPath string) error {
 	if _, err := db.ExecContext(ctx, `
 		PRAGMA busy_timeout = 5000;
@@ -304,6 +366,9 @@ func initHistory(ctx context.Context, db *sql.DB, csvPath string) error {
 		);
 	`); err != nil {
 		return err
+	}
+	if err := normalizeStoredSensorDeviceIDs(ctx, db); err != nil {
+		return fmt.Errorf("normalize sensor device IDs: %w", err)
 	}
 	csv := &store{path: csvPath}
 	points, err := csv.load()
