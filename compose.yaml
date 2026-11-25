@@ -27,4 +27,5 @@ services:
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
 volumes:
   templogger_data:
+    external: true
     name: templogger_data
