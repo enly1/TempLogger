@@ -185,9 +185,7 @@ function renderSensorMetrics(currentSensors) {
     }
     const id = document.createElement('strong');
     id.textContent = sensorAlias(sensor.deviceId);
-    const format = document.createElement('small');
-    format.textContent = sensor.format || 'Sensor';
-    identity.append(id, format);
+    identity.append(id);
     heading.append(identity);
     card.append(heading);
 
@@ -295,7 +293,7 @@ function nearestPointOnChart(canvas, field, clientX, clientY) {
 
 function drawHoverTooltip(ctx, canvas, point, px, py) {
   const lines = [];
-  const identity = [sensorAlias(point.deviceId) || 'Mock sensor', point.format].filter(Boolean).join(' · ');
+  const identity = sensorAlias(point.deviceId) || 'Mock sensor';
   lines.push(identity, dateTime.format(point.at));
   const measurements = [];
   if (point.temperature != null) measurements.push(point.temperature.toFixed(2) + ' °C');
@@ -343,7 +341,7 @@ function renderSensorToggles() {
       axisLimits = {};
       draw();
     });
-    label.append(checkbox, document.createTextNode(`${sensorAlias(sensor.deviceId)} · ${sensor.format}`));
+    label.append(checkbox, document.createTextNode(sensorAlias(sensor.deviceId)));
     list.append(label);
   }
 }

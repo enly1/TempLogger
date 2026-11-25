@@ -25,7 +25,6 @@ h1 { font-size: clamp(27px, 5vw, 38px); letter-spacing: -.045em; margin: 3px 0 0
 .sensor-name-button:hover { border-color: transparent; }
 .sensor-name-button:focus-visible { outline: 2px solid #72d7a9; outline-offset: 3px; }
 .sensor-card-identity strong { display: block; overflow: hidden; color: var(--sensor-color, #72d7a9); font: 13px ui-monospace, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.sensor-card-identity small { display: block; margin-top: 3px; color: #a1b4ac; }
 .sensor-primary { display: flex; flex-direction: column; gap: 2px; margin: 12px 0 10px; }
 .sensor-primary span, .sensor-stats dt { color: #a1b4ac; font-size: 11px; }
 .sensor-primary strong { font-size: clamp(25px, 3vw, 34px); line-height: 1.1; font-variant-numeric: tabular-nums; }
