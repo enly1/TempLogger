@@ -28,6 +28,7 @@ let chartMode = 'smooth';
 let mockMode = false, drag = null;
 const BUCKETS_PER_PIXEL = 2;
 const MAX_BUCKETS = 5000;
+const SMOOTH_POINTS = 100;
 
 function mockReadings(from, to, buckets) {
   const duration = Math.max(1000, to - from);
@@ -346,6 +347,24 @@ function renderSensorToggles() {
   }
 }
 
+function smoothCoordinates(segment, field, x, y) {
+  if (segment.length < 3) return segment.map(point => [x(point.at), y(point[field])]);
+  const buckets = new Array(SMOOTH_POINTS);
+  const duration = displayed.to - displayed.from;
+  for (const point of segment) {
+    const index = Math.max(0, Math.min(SMOOTH_POINTS - 1,
+      Math.floor((point.at - displayed.from) * SMOOTH_POINTS / duration)));
+    const bucket = buckets[index] ?? (buckets[index] = {at: 0, value: 0, count: 0});
+    bucket.at += point.at;
+    bucket.value += point[field];
+    bucket.count++;
+  }
+  return buckets.filter(Boolean).map(bucket => [
+    x(bucket.at / bucket.count),
+    y(bucket.value / bucket.count)
+  ]);
+}
+
 function render({canvas, field, color}) {
   const width = canvas.clientWidth, height = canvas.clientHeight;
   if (width < 100 || !displayed) return;
@@ -395,14 +414,16 @@ function render({canvas, field, color}) {
       else segment.push(point);
     }
     for (const segment of segments) {
-    const coords = segment.map(point => [x(point.at), y(point[field])]);
+    const coords = chartMode === 'smooth'
+      ? smoothCoordinates(segment, field, x, y)
+      : segment.map(point => [x(point.at), y(point[field])]);
     ctx.moveTo(coords[0][0], coords[0][1]);
     if (chartMode === 'raw' || coords.length < 3) {
       for (let i = 1; i < coords.length; i++) ctx.lineTo(coords[i][0], coords[i][1]);
       continue;
     }
-    // Catmull-Rom control points make a smooth curve that passes through every
-    // sampled reading. Draw each gap-delimited segment independently.
+    // Smooth mode draws a curve through averaged time buckets. Raw readings
+    // remain available for hover, and each gap-delimited segment stays separate.
     for (let i = 0; i < coords.length - 1; i++) {
       const p0 = coords[Math.max(0, i - 1)], p1 = coords[i];
       const p2 = coords[i + 1], p3 = coords[Math.min(coords.length - 1, i + 2)];
