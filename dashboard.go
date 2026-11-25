@@ -503,6 +503,52 @@ func deleteHistoryBetween(ctx context.Context, db *sql.DB, from, to int64) (int6
 	return deleted, nil
 }
 
+func deleteSensorHistoryBetween(ctx context.Context, db *sql.DB, from, to int64, deviceIDs []string) (int64, error) {
+	if len(deviceIDs) == 0 {
+		return 0, errors.New("at least one sensor must be selected")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var deleted int64
+	for _, deviceID := range deviceIDs {
+		// Legacy readings belong to the original ATC sensor. Tombstones keep
+		// those rows from being restored from CSV or migrated back on startup.
+		if deviceID == "A4C138EA80E1" {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO deleted_readings (at)
+				SELECT at FROM readings WHERE at BETWEEN ? AND ?`, from, to); err != nil {
+				return 0, err
+			}
+			result, err := tx.ExecContext(ctx, "DELETE FROM readings WHERE at BETWEEN ? AND ?", from, to)
+			if err != nil {
+				return 0, err
+			}
+			count, err := result.RowsAffected()
+			if err != nil {
+				return 0, err
+			}
+			deleted += count
+		}
+		result, err := tx.ExecContext(ctx,
+			"DELETE FROM sensor_readings WHERE device_id = ? AND at BETWEEN ? AND ?", deviceID, from, to)
+		if err != nil {
+			return 0, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		deleted += count
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) http.Handler {
 	mux := http.NewServeMux()
 	assets, _ := fs.Sub(dashboardFiles, "web")
@@ -704,8 +750,27 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 			http.Error(w, "Expected a valid from/to range in milliseconds", http.StatusBadRequest)
 			return
 		}
-		deleted, err := deleteHistoryBetween(r.Context(), db,
-			from*int64(time.Millisecond), (to+1)*int64(time.Millisecond)-1)
+		deviceIDs := r.URL.Query()["sensor"]
+		if len(deviceIDs) == 0 || len(deviceIDs) > 100 {
+			http.Error(w, "Select between 1 and 100 sensors to delete", http.StatusBadRequest)
+			return
+		}
+		uniqueIDs := make([]string, 0, len(deviceIDs))
+		seenIDs := make(map[string]struct{}, len(deviceIDs))
+		for _, deviceID := range deviceIDs {
+			deviceID = strings.TrimSpace(deviceID)
+			if deviceID == "" || len(deviceID) > 128 {
+				http.Error(w, "Expected valid sensor IDs", http.StatusBadRequest)
+				return
+			}
+			if _, exists := seenIDs[deviceID]; exists {
+				continue
+			}
+			seenIDs[deviceID] = struct{}{}
+			uniqueIDs = append(uniqueIDs, deviceID)
+		}
+		deleted, err := deleteSensorHistoryBetween(r.Context(), db,
+			from*int64(time.Millisecond), (to+1)*int64(time.Millisecond)-1, uniqueIDs)
 		if err != nil {
 			log.Print(err)
 			http.Error(w, "Could not delete history", http.StatusInternalServerError)

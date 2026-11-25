@@ -447,11 +447,16 @@ function setChartMode(mode) {
   draw();
 }
 
-async function confirmDeleteReadings(from, to) {
+async function confirmDeleteReadings(from, to, deviceIds) {
+  const selected = sensors.filter(sensor => deviceIds.includes(sensor.deviceId));
+  const sensorNames = selected.map(sensor => sensorAlias(sensor.deviceId));
   const formatter = new Intl.DateTimeFormat(undefined, {dateStyle: 'medium', timeStyle: 'medium'});
-  if (!window.confirm(`Permanently delete recorded readings from ${formatter.format(from)} through ${formatter.format(to)}? This cannot be undone.`)) return;
+  const scope = sensorNames.length ? sensorNames.join(', ') : deviceIds.join(', ');
+  if (!window.confirm(`Permanently delete readings for ${scope} from ${formatter.format(from)} through ${formatter.format(to)}? This cannot be undone.`)) return;
   try {
-    const response = await fetch('/api/readings?from=' + from + '&to=' + to, {method: 'DELETE'});
+    const query = new URLSearchParams({from: String(from), to: String(to)});
+    for (const deviceId of deviceIds) query.append('sensor', deviceId);
+    const response = await fetch('/api/readings?' + query.toString(), {method: 'DELETE'});
     if (!response.ok) throw new Error('Could not delete readings');
     const result = await response.json();
     displayed = null;
@@ -521,11 +526,16 @@ for (const {canvas} of charts) {
       event.preventDefault();
       return;
     }
+    if (operation === 'delete' && selectedSensors.size === 0) {
+      get('status').textContent = 'Select at least one sensor before selecting readings to delete';
+      event.preventDefault();
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const x = event.clientX - rect.left;
     if (x < 48 || x > canvas.clientWidth - 14) return;
     if (operation === 'delete') event.preventDefault();
-    drag = {canvas, operation, startX: x, currentX: x, startAt: timeAt(event.clientX), currentAt: timeAt(event.clientX)};
+    drag = {canvas, operation, startX: x, currentX: x, startAt: timeAt(event.clientX), currentAt: timeAt(event.clientX), sensorIds: operation === 'delete' ? [...selectedSensors] : []};
     cursor = null;
     hoveredCanvas = null;
     canvas.setPointerCapture(event.pointerId);
@@ -553,7 +563,7 @@ for (const {canvas} of charts) {
       const to = Math.min(displayed.to, Math.ceil(Math.max(selection.startAt, selection.currentAt)));
       if (to - from >= 1000) {
         if (selection.operation === 'delete') {
-          void confirmDeleteReadings(from, to);
+          void confirmDeleteReadings(from, to, selection.sensorIds);
           return;
         }
         span = to - from;
