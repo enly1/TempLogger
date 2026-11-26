@@ -172,6 +172,13 @@ func describeSensorMetric(value *float64, format string, args ...any) string {
 	return fmt.Sprintf(format, append([]any{*value}, args...)...)
 }
 
+func proxyLogName(host string) string {
+	if name, _, err := net.SplitHostPort(host); err == nil {
+		host = name
+	}
+	return strings.TrimSuffix(host, ".local")
+}
+
 func logSensorObservation(observation sensorObservation, alias, source string) {
 	packet := ""
 	if observation.Counter != nil {
@@ -181,8 +188,12 @@ func logSensorObservation(observation sensorObservation, alias, source string) {
 	if label == "" {
 		label = observation.DeviceID
 	}
-	log.Printf("BLE sensor %s %s [%s, %s] RSSI %d dBm | temperature %s | humidity %s | battery %s | voltage %s%s",
-		source, observation.DeviceID, label, observation.Format, observation.RSSI,
+	collector := "BLE sensor L"
+	if source != "L" {
+		collector = strings.TrimSuffix(source, ".local") + " P"
+	}
+	log.Printf("%s %s [%s, %s] RSSI %d dBm | temperature %s | humidity %s | battery %s | voltage %s%s",
+		collector, observation.DeviceID, label, observation.Format, observation.RSSI,
 		describeSensorMetric(observation.Temperature, "%.2f°C"),
 		describeSensorMetric(observation.Humidity, "%.1f%%"),
 		describeSensorMetric(observation.Battery, "%.0f%%"),
@@ -927,7 +938,7 @@ func collectProxySensors(ctx context.Context, host, key string, sink *sensorObse
 			for _, adv := range advertisements {
 				for _, observation := range decodeSensorObservations(adv) {
 					lastValid.Store(time.Now().UnixNano())
-					sink.record(ctx, observation, "P")
+					sink.record(ctx, observation, proxyLogName(host))
 				}
 			}
 		}
