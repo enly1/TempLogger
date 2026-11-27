@@ -1735,6 +1735,9 @@ func main() {
 	proxies := flag.String("proxies", "", "comma-separated ESPHome proxy hosts for web mode; overrides --proxy")
 	proxyKey := flag.String("proxy-key", os.Getenv("ESPHOME_API_KEY"), "ESPHome API encryption key (or set ESPHOME_API_KEY)")
 	localBLE := flag.Bool("local-ble", false, "use local Bluetooth instead of proxy outside web mode; add local scanning in web mode")
+	localOnly := false
+	flag.BoolVar(&localOnly, "localonly", false, "in web mode, collect only through the local Bluetooth adapter")
+	flag.BoolVar(&localOnly, "local-only", false, "alias for --localonly")
 	scan := flag.Bool("scan", false, "list nearby BLE advertisements received through the proxy, then exit")
 	scanLocal := flag.Bool("scan-local", false, "list nearby BLE advertisements using the local Bluetooth adapter, then exit")
 	scanSeconds := flag.Float64("scan-seconds", 30, "scan duration in seconds for --scan or --scan-local")
@@ -1750,10 +1753,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--proxies can only be used with --web")
 		os.Exit(2)
 	}
-	proxyHosts, err := parseProxyHosts(*proxies, *proxy)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	if localOnly && !*web {
+		fmt.Fprintln(os.Stderr, "--localonly can only be used with --web")
 		os.Exit(2)
+	}
+	var proxyHosts []string
+	if localOnly {
+		*localBLE = true
+	} else {
+		var err error
+		proxyHosts, err = parseProxyHosts(*proxies, *proxy)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 	}
 	if (*scan && *scanLocal) || ((*scan || *scanLocal) && (*proxyLogs || *sensorConfig || *sensorATC1441Defaults)) ||
 		(*proxyLogs && (*sensorConfig || *sensorATC1441Defaults)) || (*sensorConfig && *sensorATC1441Defaults) {

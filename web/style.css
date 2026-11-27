@@ -28,6 +28,7 @@ h1 { font-size: clamp(27px, 5vw, 38px); letter-spacing: -.045em; margin: 3px 0 0
 .sensor-primary { display: flex; flex-direction: column; gap: 2px; margin: 12px 0 10px; }
 .sensor-primary span, .sensor-stats dt { color: #a1b4ac; font-size: 11px; }
 .sensor-primary strong { font-size: clamp(25px, 3vw, 34px); line-height: 1.1; font-variant-numeric: tabular-nums; }
+.sensor-primary .sensor-delta { color: #a1b4ac; font-size: 13px; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .sensor-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin: 0; }
 .sensor-stats div { min-width: 0; }
 .sensor-stats dt { margin: 0 0 2px; }

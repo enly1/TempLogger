@@ -196,7 +196,14 @@ function renderSensorMetrics(currentSensors) {
     primaryLabel.textContent = 'Temperature';
     const temperature = document.createElement('strong');
     temperature.textContent = sensor.temperature == null ? '—' : sensor.temperature.toFixed(1) + ' °C';
+    const temperatureDelta = sensor.temperatureDeltaCPerHour;
     primary.append(primaryLabel, temperature);
+    if (temperatureDelta != null) {
+      const delta = document.createElement('small');
+      delta.className = 'sensor-delta';
+      delta.textContent = `${temperatureDelta >= 0 ? '+' : ''}${temperatureDelta.toFixed(1)} °C/h`;
+      primary.append(delta);
+    }
     card.append(primary);
 
     const stats = document.createElement('dl');

@@ -50,15 +50,53 @@ type dashboardReading struct {
 }
 
 type dashboardSensorReading struct {
-	At          int64    `json:"at"`
-	DeviceID    string   `json:"deviceId"`
-	Format      string   `json:"format"`
-	Temperature *float64 `json:"temperature"`
-	Humidity    *float64 `json:"humidity"`
-	Battery     *float64 `json:"battery"`
-	Millivolts  *float64 `json:"millivolts"`
-	RSSI        int      `json:"rssi"`
-	Segment     int64    `json:"segment"`
+	At                       int64    `json:"at"`
+	DeviceID                 string   `json:"deviceId"`
+	Format                   string   `json:"format"`
+	Temperature              *float64 `json:"temperature"`
+	TemperatureDeltaCPerHour *float64 `json:"temperatureDeltaCPerHour,omitempty"`
+	Humidity                 *float64 `json:"humidity"`
+	Battery                  *float64 `json:"battery"`
+	Millivolts               *float64 `json:"millivolts"`
+	RSSI                     int      `json:"rssi"`
+	Segment                  int64    `json:"segment"`
+}
+
+// sensorTemperatureRate estimates the recent temperature change from the first
+// and latest temperature readings in the preceding hour.
+func sensorTemperatureRate(ctx context.Context, db sqlQueryRower, deviceID string) (*float64, error) {
+	var firstAt int64
+	var latestAt int64
+	var firstTemperature float64
+	var latestTemperature float64
+	err := db.QueryRowContext(ctx, `SELECT at, temperature FROM sensor_readings
+		WHERE device_id = ? AND temperature IS NOT NULL
+		ORDER BY at DESC LIMIT 1`, deviceID).Scan(&latestAt, &latestTemperature)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	err = db.QueryRowContext(ctx, `SELECT at, temperature FROM sensor_readings
+		WHERE device_id = ? AND at BETWEEN ? AND ? AND temperature IS NOT NULL
+		ORDER BY at ASC LIMIT 1`, deviceID, latestAt-int64(time.Hour), latestAt).Scan(&firstAt, &firstTemperature)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if latestAt <= firstAt {
+		return nil, nil
+	}
+	hours := float64(latestAt-firstAt) / float64(time.Hour)
+	rate := (latestTemperature - firstTemperature) / hours
+	return &rate, nil
+}
+
+type sqlQueryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 type dashboardSensor struct {
@@ -627,6 +665,18 @@ func dashboardHandler(db *sql.DB, interval time.Duration, status *atomic.Value) 
 			return
 		}
 		rows.Close()
+		for i := range latestSensors {
+			if latestSensors[i].Temperature == nil {
+				continue
+			}
+			rate, err := sensorTemperatureRate(r.Context(), db, latestSensors[i].DeviceID)
+			if err != nil {
+				log.Print(err)
+				http.Error(w, "Could not calculate recent temperature change", http.StatusInternalServerError)
+				return
+			}
+			latestSensors[i].TemperatureDeltaCPerHour = rate
+		}
 		sendJSON(w, map[string]any{"latest": latest, "latestSensors": latestSensors, "first": first.Int64 / int64(time.Millisecond),
 			"interval": interval.Milliseconds(), "state": status.Load(), "now": time.Now().UnixMilli()})
 	})
@@ -810,7 +860,9 @@ func runDashboard(dbPath, csvPath, bind string, port int, interval time.Duration
 	status.Store("History only")
 	if !viewOnly {
 		status.Store("Connecting to Bluetooth proxies")
-		if localBLE {
+		if len(proxyHosts) == 0 && localBLE {
+			status.Store("Scanning local Bluetooth adapter")
+		} else if localBLE {
 			status.Store("Connecting to Bluetooth proxies · scanning locally")
 		}
 		go runDashboardCollector(ctx, db, interval, &status, proxyHosts, proxyKey, localBLE)
