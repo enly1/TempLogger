@@ -6,7 +6,11 @@ The root `compose.yaml` is ready to deploy from Arcane. It pulls the private
 `enly1/templogger:latest` image for `linux/amd64`, serves the dashboard directly
 on host port `9000`, and stores SQLite and CSV data in the named
 `templogger_data` volume. It collects from two configured ESPHome proxies and
-the local BLE adapter at the same time. The proxy names are resolved through
+the local BLE adapter at the same time. It also starts one proxy log monitor
+container for each configured proxy, all within this Compose stack. Set
+`BT_PROXY_1` and `BT_PROXY_2` in the environment (or Arcane project variables)
+to change the proxy hostnames; they default to the two names currently used.
+The proxy names are resolved through
 mDNS, so the container uses host networking to receive multicast traffic.
 Local Bluetooth scanning uses the Docker host's BlueZ service through
 `/run/dbus/system_bus_socket`, so deploy it to a Linux host with a working
@@ -23,9 +27,11 @@ Before deploying in Arcane:
 
 1. In **Images → Registries**, add Docker Hub credentials for `docker.io` so
    Arcane can pull the private image. Use a Docker Hub access token.
-2. If the ESPHome proxy uses API encryption, add `ESPHOME_API_KEY` under
-   **Projects → Variables**, mark it as a secret, and scope it to the agent
-   that will run TempLogger. The Compose file passes this value to the app.
+2. Add `BT_PROXY_1` and `BT_PROXY_2` under **Projects → Variables** to set the
+   ESPHome Bluetooth proxy hostnames. If a proxy uses API encryption, add
+   `ESPHOME_API_KEY`, mark it as a secret, and scope it to the agent that will
+   run TempLogger. The Compose file passes these values to the dashboard and
+   each proxy log monitor.
 3. Create a project using this `compose.yaml` and deploy it. Arcane's pull
    policy is set to **always** in the Compose file so redeploys pick up the
    current `latest` image.

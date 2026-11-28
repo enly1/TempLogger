@@ -11,6 +11,8 @@ services:
     environment:
       TZ: Europe/London
       ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
+      BT_PROXY_1: ${BT_PROXY_1:-esp32-bluetooth-proxy-8f3b98.local}
+      BT_PROXY_2: ${BT_PROXY_2:-esp32-bluetooth-proxy-8d1244.local}
     command:
       - --web
       - --bind
@@ -21,10 +23,32 @@ services:
       - /data/readings.csv
       - --local-ble
       - --proxies
-      - esp32-bluetooth-proxy-8f3b98.local,esp32-bluetooth-proxy-8d1244.local
+      - ${BT_PROXY_1:-esp32-bluetooth-proxy-8f3b98.local},${BT_PROXY_2:-esp32-bluetooth-proxy-8d1244.local}
     volumes:
       - templogger_data:/data
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+  templogger-proxylogs-1:
+    image: enly1/templogger:latest
+    platform: linux/amd64
+    pull_policy: always
+    restart: unless-stopped
+    network_mode: host
+    command: ["--proxy-logs", "--proxy", "${BT_PROXY_1:-esp32-bluetooth-proxy-8f3b98.local}"]
+    environment:
+      TZ: Europe/London
+      ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
+      BT_PROXY: ${BT_PROXY_1:-esp32-bluetooth-proxy-8f3b98.local}
+  templogger-proxylogs-2:
+    image: enly1/templogger:latest
+    platform: linux/amd64
+    pull_policy: always
+    restart: unless-stopped
+    network_mode: host
+    command: ["--proxy-logs", "--proxy", "${BT_PROXY_2:-esp32-bluetooth-proxy-8d1244.local}"]
+    environment:
+      TZ: Europe/London
+      ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
+      BT_PROXY: ${BT_PROXY_2:-esp32-bluetooth-proxy-8d1244.local}
 volumes:
   templogger_data:
     external: true
