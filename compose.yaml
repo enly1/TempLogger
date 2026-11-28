@@ -27,7 +27,7 @@ services:
     volumes:
       - templogger_data:/data
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
-  templogger-proxylogs-1:
+  proxylogs-1:
     image: enly1/templogger:latest
     platform: linux/amd64
     pull_policy: always
@@ -38,7 +38,7 @@ services:
       TZ: Europe/London
       ESPHOME_API_KEY: ${ESPHOME_API_KEY:-}
       BT_PROXY: ${BT_PROXY_1:-esp32-bluetooth-proxy-8f3b98.local}
-  templogger-proxylogs-2:
+  proxylogs-2:
     image: enly1/templogger:latest
     platform: linux/amd64
     pull_policy: always
