@@ -302,9 +302,9 @@ function nearestPointOnChart(canvas, field, clientX, clientY) {
 function drawHoverTooltip(ctx, canvas, point, px, py) {
   const lines = [];
   const identity = sensorAlias(point.deviceId) || 'Mock sensor';
-  lines.push(identity, dateTime.format(point.at));
+  const temperature = point.temperature == null ? '' : point.temperature.toFixed(2) + ' °C';
+  lines.push([identity, temperature].filter(Boolean).join(' - '), dateTime.format(point.at));
   const measurements = [];
-  if (point.temperature != null) measurements.push(point.temperature.toFixed(2) + ' °C');
   if (point.humidity != null) measurements.push(point.humidity.toFixed(1) + '% RH');
   if (point.battery != null) measurements.push(point.battery.toFixed(0) + '% battery');
   if (point.millivolts != null) measurements.push(point.millivolts.toFixed(0) + ' mV');
